@@ -61,3 +61,297 @@ function populateContacts() {
   // na succes:
   currentPage++;
   userProperties.setProperty('currentPage', String(currentPage));
+
+  const options = {
+    method: 'POST',
+    contentType: 'application/json',
+    headers: getHeaders(),
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  try {
+    const response = UrlFetchApp.fetch(apiUrl, options);
+    const result = JSON.parse(response.getContentText());
+
+    Logger.log(`🔍 Full API Response: ${JSON.stringify(result, null, 2)}`);
+
+    if (result.requestId) {
+      userProperties.setProperty('requestId', result.requestId);
+    }
+
+    if (result.data && Array.isArray(result.data)) {
+      Logger.log(`📌 Contacts received: ${result.data.length} contacts`);
+      const contactIds = result.data.map(contact => String(contact.contactId));
+      userProperties.setProperty('contactIdsList', JSON.stringify(contactIds));
+      appendContactsToSheet(sheet, result.data);
+
+      currentPage++;
+      pageCell.setValue(currentPage);
+    } else {
+      Logger.log("No data found in response.");
+    }
+  } catch (error) {
+    Logger.log(`Request failed: ${error.message}`);
+  }
+}
+
+function appendContactsToSheet(sheet, contacts) {
+  if (!contacts || contacts.length === 0) {
+    Logger.log("⚠️ No contacts to append.");
+    return;
+  }
+
+  // 🔍 DEBUG: Log the first contact to see the actual structure
+  Logger.log(`🔍 First contact structure: ${JSON.stringify(contacts[0], null, 2)}`);
+
+  const data = contacts.map((contact, index) => {
+    // ✅ FIXED: The API returns 'name' as a single string, not an object
+    const fullName = contact.name || '';
+    
+    // Split the full name into first and last names
+    const nameParts = fullName.trim().split(' ');
+    const firstName = nameParts[0] || '';
+    const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : '';
+    
+    // 🔍 DEBUG: Log what we're actually using
+    Logger.log(`🔍 Contact ${index}: Full="${fullName}", First="${firstName}", Last="${lastName}"`);
+    
+    return [
+      firstName,        // First Name
+      lastName,         // Last Name  
+      fullName,         // Full Name
+      contact.jobTitle || '',
+      contact.companyName || '',
+      contact.fqdn || '',
+      PropertiesService.getUserProperties().getProperty('requestId') || '',
+      contact.contactId || '',
+      contact.isShown ? 'Yes' : 'No',
+      'No' // Default "Enriched" column to "No"
+    ];
+  });
+
+  // 🔍 DEBUG: Log the final data array for first contact
+  Logger.log(`🔍 Final data for first contact: ${JSON.stringify(data[0])}`);
+
+  const lastRow = sheet.getLastRow();
+  const startRow = getNextEmptyRow_AP_(sheet);
+
+  try {
+    sheet.getRange(startRow, 1, data.length, data[0].length).setValues(data);
+    Logger.log(`✅ Successfully appended ${data.length} contacts starting at row ${startRow}.`);
+  } catch (error) {
+    Logger.log(`❌ Error appending contacts: ${error.message}`);
+    Logger.log(`❌ Data that failed to write: ${JSON.stringify(data[0])}`);
+  }
+}
+
+function enrichContacts() {
+  const apiUrl = `${BASE_URL}/contact/enrich`;
+  const sheet = getSheet();
+  const userProperties = PropertiesService.getUserProperties();
+
+  const requestId = userProperties.getProperty('requestId');
+  const contactIdsList = JSON.parse(userProperties.getProperty('contactIdsList') || '[]');
+
+  Logger.log(`📌 Stored Request ID: ${requestId}`);
+  Logger.log(`📌 Stored Contact IDs: ${JSON.stringify(contactIdsList)}`);
+
+  if (!requestId || contactIdsList.length === 0) {
+    Logger.log("❌ No requestId or contact IDs available for enrichment.");
+    return;
+  }
+
+  const payload = { requestId: requestId, contactIds: contactIdsList };
+
+  const options = {
+    method: 'POST',
+    contentType: 'application/json',
+    headers: getHeaders(),
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  try {
+    const response = UrlFetchApp.fetch(apiUrl, options);
+    const result = JSON.parse(response.getContentText());
+
+    Logger.log(`🔍 API Response: ${JSON.stringify(result, null, 2)}`);
+
+    if (result.contacts && Array.isArray(result.contacts)) {
+      appendEnrichedContactsToSheet(sheet, result.contacts);
+      Logger.log(`✅ Successfully enriched ${result.contacts.length} contacts.`);
+    } else {
+      Logger.log("⚠️ No contacts returned in enrichment response.");
+    }
+  } catch (error) {
+    Logger.log(`❌ Enrichment request failed: ${error.message}`);
+  }
+}
+
+function getNextEmptyRow_AP_(sheet) {
+  const START_ROW = 2;   // data start op rij 2
+  const END_COL = 16;    // kolom P = 16
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < START_ROW) return START_ROW;
+
+  const values = sheet
+    .getRange(START_ROW, 1, lastRow - START_ROW + 1, END_COL)
+    .getDisplayValues();
+
+  for (let i = values.length - 1; i >= 0; i--) {
+    if (values[i].some(cell => String(cell).trim() !== '')) {
+      return START_ROW + i + 1; // volgende lege rij
+    }
+  }
+  return START_ROW;
+}
+
+function appendEnrichedContactsToSheet(sheet, enrichedContacts) {
+  if (!enrichedContacts || enrichedContacts.length === 0) return;
+
+  const sheetData = sheet.getDataRange().getValues();
+
+  const contactIdCol = 8;     // H
+  const enrichedCol = 10;     // J
+  const enrichStartCol = 11;  // K (LinkedIn URL)
+
+  const rowMapping = {};
+  for (let i = 1; i < sheetData.length; i++) { // start bij rij 2
+  const contactId = String(sheetData[i][contactIdCol - 1] || '').trim();
+  if (contactId) rowMapping[contactId] = i + 1;
+}
+
+
+  enrichedContacts.forEach((contact) => {
+    const contactId = String(contact.id || contact.contactId || '').trim();
+    if (!contactId) return;
+
+    const rowToUpdate = rowMapping[contactId];
+    if (!rowToUpdate) {
+      Logger.log(`❌ Contact ID ${contactId} not found in sheet. Skipping.`);
+      return;
+    }
+
+    const linkedIn = contact.data?.socialLinks?.linkedin || 'N/A';
+    const department = (contact.data?.departments || []).join(', ') || 'N/A';
+    const seniority = (contact.data?.seniority || []).map(s => s.value).join(', ') || 'N/A';
+    const emails = (contact.data?.emailAddresses || []).map(e => e.email).join(', ') || 'N/A';
+    const phoneNumbers = (contact.data?.phoneNumbers || []).map(p => p.number).join(', ') || 'N/A';
+    const phoneTypes = (contact.data?.phoneNumbers || []).map(p => p.phoneType).join(', ') || 'N/A';
+
+    sheet.getRange(rowToUpdate, enrichedCol).setValue("Yes");
+    sheet.getRange(rowToUpdate, enrichedCol).setBackground("#A9DFBF");
+
+    sheet.getRange(rowToUpdate, enrichStartCol, 1, 6).setValues([[
+      linkedIn, department, seniority, emails, phoneNumbers, phoneTypes
+    ]]);
+
+    Logger.log(`✅ Updated Row ${rowToUpdate} | Enriched: Yes`);
+  });
+}
+
+// ✅ Function for Clicking "Enrich Row"
+function onEnrichRowClick() {
+  const sheet = getSheet();
+  const range = sheet.getActiveRange(); // Get selected rows
+
+  if (!range) {
+    Logger.log("❌ No rows selected.");
+    return;
+  }
+
+  const values = range.getValues();
+  const contactIdColumnIndex = 12; // Column L (Contact ID)
+  const contactIds = [];
+
+  for (let i = 0; i < values.length; i++) {
+    const contactId = values[i][contactIdColumnIndex - 1];
+    if (contactId) {
+      contactIds.push(String(contactId).trim());
+    }
+  }
+
+  if (contactIds.length === 0) {
+    Logger.log("❌ No valid Contact IDs found in selected rows.");
+    return;
+  }
+
+  Logger.log(`✅ Enriching Contacts: ${JSON.stringify(contactIds)}`);
+  enrichContactsByIds(contactIds);
+}
+
+// ✅ Function to Enrich Only Selected Contacts
+function enrichContactsByIds(contactIds) {
+  const apiUrl = `${BASE_URL}/contact/enrich`;
+  const sheet = getSheet();
+  const userProperties = PropertiesService.getUserProperties();
+
+  const requestId = userProperties.getProperty('requestId');
+
+  if (!requestId || contactIds.length === 0) {
+    Logger.log("❌ No requestId or valid contact IDs available for enrichment.");
+    return;
+  }
+
+  const payload = { requestId: requestId, contactIds: contactIds };
+
+  const options = {
+    method: 'POST',
+    contentType: 'application/json',
+    headers: getHeaders(),
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  try {
+    const response = UrlFetchApp.fetch(apiUrl, options);
+    const result = JSON.parse(response.getContentText());
+
+    Logger.log(`🔍 API Response: ${JSON.stringify(result, null, 2)}`);
+
+    if (result.contacts && Array.isArray(result.contacts)) {
+      appendEnrichedContactsToSheet(sheet, result.contacts);
+      Logger.log(`✅ Successfully enriched ${result.contacts.length} contacts.`);
+    } else {
+      Logger.log("⚠️ No contacts returned in enrichment response.");
+    }
+  } catch (error) {
+    Logger.log(`❌ Enrichment request failed: ${error.message}`);
+  }
+}
+const COMPANIES_SPREADSHEET_ID = "1lahZ02xINgH5ualhz-JwjemBZ_DHFtWiJ9rFmj2UDlg"; // de sheet waarin je wil checken
+const COMPANY_LOOKUP_SHEET_NAME = "Acquisitietool";
+const COMPANY_LOOKUP_COL = 1;                 // kolomnummer waar companynaam staat (A=1, B=2, ...)
+
+const DUPLICATES_SHEET_NAME = "DUPLICATES";   // sheet waar je skipped rows logt
+
+function normalizeCompanyName_(name) {
+  return (name || "").toString().trim().toLowerCase();
+}
+
+function getOrCreateSheet_(name) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  return ss.getSheetByName(name) || ss.insertSheet(name);
+}
+
+function getExistingCompanySet_() {
+  const ss = SpreadsheetApp.openById(COMPANIES_SPREADSHEET_ID);
+  const lookupSheet = ss.getSheetByName(COMPANY_LOOKUP_SHEET_NAME);
+  if (!lookupSheet) {
+    throw new Error(`Sheet '${COMPANY_LOOKUP_SHEET_NAME}' not found in external spreadsheet.`);
+  }
+
+  const lastRow = lookupSheet.getLastRow();
+  if (lastRow < 2) return new Set(); // alleen header of leeg
+
+  const values = lookupSheet
+    .getRange(2, COMPANY_LOOKUP_COL, lastRow - 1, 1)
+    .getValues()
+    .flat()
+    .map(v => (v || "").toString().trim().toLowerCase())
+    .filter(Boolean);
+
+  return new Set(values);
+}
