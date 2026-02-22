@@ -1,1 +1,147 @@
+function callChatGPT_(prompt) {
+  const apiKey = PropertiesService.getScriptProperties().getProperty('OPENAI_API_KEY');
+  if (!apiKey) throw new Error('OPENAI_API_KEY ontbreekt in Script Properties');
 
+  const payload = {
+    model: 'gpt-4.1-mini',
+    input: [
+      {
+        role: 'user',
+        content: [{ type: 'input_text', text: prompt }]
+      }
+    ]
+  };
+
+  const response = UrlFetchApp.fetch('https://api.openai.com/v1/responses', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: `Bearer ${apiKey}` },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  });
+
+  const body = response.getContentText();
+  Logger.log(body);
+
+  const json = JSON.parse(body);
+  if (json.error) throw new Error(JSON.stringify(json.error));
+
+  // ✅ 1) Prefer: json.output_text (als aanwezig)
+  if (json.output_text && String(json.output_text).trim() !== '') {
+    return json.output_text;
+  }
+
+  // ✅ 2) Anders: pak de eerste output_text uit output[].content[]
+  const out = json.output || [];
+  for (const item of out) {
+    if (item.type === 'message' && item.content) {
+      for (const c of item.content) {
+        if (c.type === 'output_text' && c.text) {
+          return c.text;
+        }
+      }
+    }
+  }
+
+  // ✅ 3) Als echt niets gevonden: gooi error met context
+  throw new Error('No output_text found in response payload.');
+}
+
+function extractJsonObject_(text) {
+  if (!text) throw new Error('Empty AI response');
+
+  let s = String(text).trim();
+
+  // Strip ```json ... ``` of ``` ... ```
+  s = s.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+
+  // Pak alleen het eerste JSON object in de tekst
+  const start = s.indexOf('{');
+  const end = s.lastIndexOf('}');
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error('No JSON object found in AI response: ' + s.slice(0, 200));
+  }
+
+  return s.slice(start, end + 1);
+}
+
+
+function testChatGPTConnection() {
+  const result = callChatGPT_('Say only: OK');
+  Logger.log(result);
+}
+
+function runAIForSelectedRow() {
+  const sheet = getSheet();
+  const range = sheet.getActiveRange();
+  const row = range.getRow();
+
+  if (row < 2) {
+    SpreadsheetApp.getUi().alert('Selecteer een data-rij');
+    return;
+  }
+
+  // Lees A–V (1..22) zodat je ook Consultant/Vestiging/etc kunt gebruiken
+  const rowData = sheet.getRange(row, 1, 1, 22).getValues()[0]; // A:V
+
+  const firstName = rowData[0];        // A
+  const jobTitle = rowData[3];         // D
+  const companyName = rowData[4];      // E
+  const website = rowData[5];          // F
+  const consultant = rowData[16];      // Q
+  const vestiging = rowData[17];       // R
+  const type = rowData[18];            // S
+  const gevallen = rowData[19];        // T
+  const source = rowData[20];          // U
+  const datum = rowData[21];           // V
+
+  const AI_STATUS_COL = 23; // W
+  const AI_SUMMARY_COL = 24; // X (optioneel)
+  const AI_MESSAGE_COL = 25; // Y
+
+  sheet.getRange(row, AI_STATUS_COL).setValue('RUNNING');
+
+  const prompt = `
+You are a B2B outreach assistant writing in Dutch.
+
+Contact:
+- First name: ${firstName}
+- Job title: ${jobTitle}
+- Company: ${companyName}
+- Website: ${website}
+
+My context:
+- Consultant: ${consultant}
+- Vestiging: ${vestiging}
+- Type: ${type}
+- Gevallen: ${gevallen}
+- Source: ${source}
+- Date: ${datum}
+
+Task:
+1) Write a short personalized outreach email (max 90 words) in Dutch.
+2) Include a subject line.
+Return STRICT JSON:
+{
+  "subject": "...",
+  "message": "..."
+}
+`;
+
+  try {
+    const resultText = callChatGPT_(prompt);
+
+    // resultText moet JSON zijn volgens prompt
+    const jsonStr = extractJsonObject_(resultText);
+    const obj = JSON.parse(jsonStr);
+
+    // Schrijf output in Y (en eventueel X)
+    sheet.getRange(row, AI_MESSAGE_COL).setValue(`Onderwerp: ${obj.subject}\n\n${obj.message}`);
+    sheet.getRange(row, AI_STATUS_COL).setValue('DONE');
+  } catch (e) {
+    sheet.getRange(row, AI_STATUS_COL).setValue('ERROR');
+    // Zet foutmelding in X zodat je ziet wat er mis ging
+    sheet.getRange(row, AI_SUMMARY_COL).setValue(String(e));
+    throw e;
+  }
+}
