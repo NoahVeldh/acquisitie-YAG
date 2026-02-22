@@ -1,0 +1,59 @@
+def render_subject_body(row):
+    first = (row.get("First Name") or "").strip()
+    company = (row.get("Company Name") or "").strip()
+    title = (row.get("Job Title") or "").strip()
+
+    # fallback aanhef
+    salutation = first if first else "Beste,"
+
+    # onderwerp kort en relevant
+    subject = f"Korte vraag over extra uitvoeringskracht bij {company}".strip()
+
+    body = (
+        f"{salutation},\n\n"
+        f"Ik zag dat je bij {company} werkt als {title}. Wij ondersteunen organisaties met extra uitvoeringskracht: "
+        f"via inzet van mensen of door werkstromen uit te voeren/uit te besteden. Waar relevant kan dat ook helpen "
+        f"bij SROI/PSO.\n\n"
+        f"Mag ik je 2 vragen stellen om te kijken of dit bij jullie speelt (10 min call)?\n\n"
+
+    )
+    return subject, body
+
+import time
+
+MAX_TO_SEND = 5          # begin klein
+SLEEP_SECONDS = 60        # throttle tussen mails
+
+sent_count = 0
+
+for _, row in leads.iterrows():
+    email = row["email"].strip().lower()
+
+    # check 1: suppression
+    if email in suppressed:
+        continue
+
+    # check 2: batchlimiet
+    if sent_count >= MAX_TO_SEND:
+        print("Batchlimiet bereikt, stop.")
+        break
+
+    subject, body = render_subject_body(row)
+
+    try:
+        resp = service.users().messages().send(
+            userId="me",
+            body=create_message(email, subject, body)
+        ).execute()
+
+        append_log(email=email, status="sent", message_id=resp.get("id", ""))
+        sent_count += 1
+        print(f"✅ Sent {sent_count}: {email} (id={resp.get('id')})")
+
+    except Exception as e:
+        append_log(email=email, status="failed", error=str(e))
+        print(f"❌ Failed: {email} | {e}")
+
+    time.sleep(SLEEP_SECONDS)
+
+print("Klaar. Sent:", sent_count)
