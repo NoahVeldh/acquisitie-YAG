@@ -1,0 +1,69 @@
+import pandas as pd
+import re
+
+PATH = "Voorbeeld acquisitie lijst.xlsx"  # zet in dezelfde map als je notebook of geef volledig pad
+
+df = pd.read_excel(PATH)
+
+# --- helper: email extract ---
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+def extract_emails(value):
+    if pd.isna(value):
+        return []
+    # haal alle emails uit de string (werkt ook als er komma's/tekens omheen staan)
+    return [e.lower() for e in EMAIL_RE.findall(str(value))]
+
+# emails naar lijst
+df["emails_list"] = df["Email(s)"].apply(extract_emails)
+
+# explode: 1 rij per email
+leads = df.explode("emails_list").rename(columns={"emails_list": "email"}).dropna(subset=["email"])
+
+# dedupe op email (houd eerste)
+leads = leads.drop_duplicates(subset=["email"]).reset_index(drop=True)
+
+print("Rijen in bron:", len(df))
+print("Unieke emails:", len(leads))
+leads[["Full Name","Job Title","Company Name","email"]].head(10)
+
+import csv
+from datetime import datetime
+
+SUPPRESSION_PATH = "suppression.csv"
+LOG_PATH = "send_log.csv"
+
+def load_suppression(path):
+    s = set()
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            r = csv.DictReader(f)
+            for row in r:
+                s.add(row["email"].strip().lower())
+    except FileNotFoundError:
+        pass
+    return s
+
+def append_log(email, status, message_id="", error=""):
+    file_exists = False
+    try:
+        with open(LOG_PATH, "r", encoding="utf-8") as _:
+            file_exists = True
+    except FileNotFoundError:
+        pass
+
+    with open(LOG_PATH, "a", newline="", encoding="utf-8") as f:
+        fieldnames = ["timestamp", "email", "status", "message_id", "error"]
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            w.writeheader()
+        w.writerow({
+            "timestamp": datetime.utcnow().isoformat(),
+            "email": email,
+            "status": status,
+            "message_id": message_id,
+            "error": error[:500]
+        })
+
+suppressed = load_suppression(SUPPRESSION_PATH)
+print("Suppressed emails:", len(suppressed))
