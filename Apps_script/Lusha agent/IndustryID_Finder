@@ -1,0 +1,21 @@
+function listIndustries() {
+  const url = `${BASE_URL}/filters/companies/industries_labels`;
+  const res = UrlFetchApp.fetch(url, {
+    method: "GET",
+    headers: getHeaders()
+  });
+
+  const industries = JSON.parse(res.getContentText());
+
+  industries.forEach(ind => {
+    Logger.log(
+      `Main: ${ind.main_industry} | ID: ${ind.main_industry_id}`
+    );
+
+    (ind.sub_industries || []).forEach(sub => {
+      Logger.log(
+        `   └─ Sub: ${sub.value} | ID: ${sub.id}`
+      );
+    });
+  });
+}
