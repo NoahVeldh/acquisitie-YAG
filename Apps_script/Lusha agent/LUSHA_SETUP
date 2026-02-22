@@ -1,5 +1,5 @@
 const SHEET_NAME = "Sheet1"; // Update this with your actual sheet name
-const API_KEY = 'cbce5269-1f01-4a16-a7e4-8957a1b8f425'; // Replace with your actual API key
+const API_KEY = 'LUSHA_KEY'; // Replace with your actual API key
 const BASE_URL = 'https://api.lusha.com/prospecting';
 
 function onOpen() {
