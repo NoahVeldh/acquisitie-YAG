@@ -1,1 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
 
+# OAuth / credentials
+Python/credentials/
+credentials.json
+token.json
+
+# Output/logs (PII)
+Python/output/
+*.csv
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
