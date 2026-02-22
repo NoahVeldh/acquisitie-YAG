@@ -1,0 +1,63 @@
+function getHeaders() {
+  return { 'api_key': API_KEY };
+}
+
+function getSheet() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
+  if (!sheet) {
+    throw new Error(`Sheet with name '${SHEET_NAME}' not found.`);
+  }
+  return sheet;
+}
+
+function setupHeaders(sheet) {
+  const baseHeaders = [
+    'First Name', 'Last Name', 'Full Name', 'Job Title',
+    'Company Name', 'Company Website','Request ID', 'Contact ID', 'isShown', 'Enriched ✅',
+  ];
+
+  const enrichHeaders = [
+    'LinkedIn URL', 'Department', 'Seniority', 'Email(s)', 'Phone(s)', 'Phone Types'
+  ];
+
+  // A1:J1
+  const baseRange = sheet.getRange(1, 1, 1, baseHeaders.length);
+  baseRange.setValues([baseHeaders]);
+  baseRange.setFontWeight("bold");
+
+  // K1:P1
+  const enrichRange = sheet.getRange(1, 11, 1, enrichHeaders.length);
+  enrichRange.setValues([enrichHeaders]);
+  enrichRange.setFontWeight("bold");
+
+  applyConditionalFormatting(sheet);
+}
+
+function applyConditionalFormatting(sheet) {
+  const enrichedColumn = sheet.getRange("J2:J"); // Enriched ✅ zit in kolom J
+  let rules = sheet.getConditionalFormatRules();
+
+  rules = rules.filter(rule =>
+    !rule.getRanges().some(r => r.getA1Notation() === enrichedColumn.getA1Notation())
+  );
+
+  const noRule = SpreadsheetApp.newConditionalFormatRule()
+    .whenTextEqualTo("No")
+    .setBackground("#F5B7B1")
+    .setRanges([enrichedColumn])
+    .build();
+
+  rules.push(noRule);
+  sheet.setConditionalFormatRules(rules);
+}
+
+function populateContacts() {
+  const apiUrl = `${BASE_URL}/contact/search/`;
+  const sheet = getSheet();
+  const userProperties = PropertiesService.getUserProperties();
+  setupHeaders(sheet);
+
+  let currentPage = Number(userProperties.getProperty('currentPage') || '0');
+  // na succes:
+  currentPage++;
+  userProperties.setProperty('currentPage', String(currentPage));
