@@ -4,6 +4,7 @@ function callChatGPT_(prompt) {
 
   const payload = {
     model: 'gpt-4.1-mini',
+    //tools: [{ type: 'web_search_preview' }],
     input: [
       {
         role: 'user',
@@ -81,66 +82,75 @@ function runAIForSelectedRow() {
     return;
   }
 
-  // Lees A–V (1..22) zodat je ook Consultant/Vestiging/etc kunt gebruiken
-  const rowData = sheet.getRange(row, 1, 1, 22).getValues()[0]; // A:V
+  const rowData = sheet.getRange(row, 1, 1, 22).getValues()[0];
+  const firstName   = rowData[0];
+  const jobTitle    = rowData[3];
+  const companyName = rowData[4];
+  const website     = rowData[5];
 
-  const firstName = rowData[0];        // A
-  const jobTitle = rowData[3];         // D
-  const companyName = rowData[4];      // E
-  const website = rowData[5];          // F
-  const consultant = rowData[16];      // Q
-  const vestiging = rowData[17];       // R
-  const type = rowData[18];            // S
-  const gevallen = rowData[19];        // T
-  const source = rowData[20];          // U
-  const datum = rowData[21];           // V
-
-  const AI_STATUS_COL = 23; // W
-  const AI_SUMMARY_COL = 24; // X (optioneel)
-  const AI_MESSAGE_COL = 25; // Y
+  const AI_STATUS_COL  = 23;
+  const AI_SUMMARY_COL = 24;
+  const AI_MESSAGE_COL = 25;
 
   sheet.getRange(row, AI_STATUS_COL).setValue('RUNNING');
 
-  const prompt = `
-You are a B2B outreach assistant writing in Dutch.
+  // ─── VASTE BLOKKEN ────────────────────────────────────────────────
+  const opening = `Ik ben Rick op het Veld, student Technische Bedrijfskunde aan de TU in Eindhoven en werkzaam bij Young Advisory Group (YAG), een volledig studenten-gerund adviesbureau. Omdat wij onze eigen acquisitie doen, ben ik actief op zoek naar bedrijven waar onze kennis waarde kan toevoegen.`;
 
-Contact:
-- First name: ${firstName}
-- Job title: ${jobTitle}
-- Company: ${companyName}
-- Website: ${website}
+  const companyPitch = `Met de Young Advisory Group (YAG) hebben we door de jaren heen veel verschillende projecten afgerond in veel verschillende industrieën. Om concrete voorbeelden te geven: recent hebben we gewerkt aan een project voor een bedrijf in de biertank industrie waarbij we geholpen hebben met de implementatie van een ERP systeem. Ook hebben we advies gegeven aan een grote dierentuin hoe zij het beste 'dynamic pricing' kon implementeren. Zelf ben ik nu bezig met een project voor de GGD waarin we gepersonaliseerde brieven opstellen voor 35 gemeenteraden om het belang van gezond opgroeien te benadrukken.
 
-My context:
-- Consultant: ${consultant}
-- Vestiging: ${vestiging}
-- Type: ${type}
-- Gevallen: ${gevallen}
-- Source: ${source}
-- Date: ${datum}
+Graag zou ik willen voorstellen om een gesprek in te plannen, waarin we kennis kunnen maken en de mogelijkheden voor een eventuele samenwerking kunnen verkennen.
 
-Task:
-1) Write a short personalized outreach email (max 90 words) in Dutch.
-2) Include a subject line.
-Return STRICT JSON:
-{
-  "subject": "...",
-  "message": "..."
-}
+Ik hoor graag of dit schikt en bij verdere vragen ben ik altijd bereikbaar!`;
+
+  const signature = `Met vriendelijke groet,
+
+Rick op het Veld
+Strategy Consultant - Young Advisory Group
+–––––––––––––––––––––––––
+Vestiging Eindhoven-Tilburg
+Videolab
+Torenallee 20
+5617 BC Eindhoven
++31 6 42 48 16 27
+rick.ophetveld@youngadvisorygroup.nl | Linkedin www.youngadvisorygroup.nl`;
+
+  // ─── STAP 1: AI genereert ALLEEN de connectiezinnen ───────────────
+  const connectionPrompt = `
+Zoek op wat ${companyName} doet (website: ${website}).
+De ontvanger is ${firstName}, ${jobTitle} — hij weet wat zijn bedrijf doet, vat het dus NIET samen.
+
+Schrijf precies 2-3 zinnen (platte tekst, geen opmaak, geen links) die uitleggen waarom Rick op het Veld,
+student Technische Bedrijfskunde (TU Eindhoven), specifiek bij ${companyName} uitkwam.
+
+Schrijf vanuit Ricks perspectief en interesse: welk thema uit zijn studie (logistiek, processen, strategie,
+data, techniek) is relevant voor hun sector? Welk type vraagstuk speelt er in hun branche?
+Wees concreet. Verboden: "innovatief", "onder de indruk", "met interesse gevolgd", URLs, of haakjes met links.
+
+Geef ALLEEN de 2-3 zinnen terug, niets anders.
 `;
 
   try {
-    const resultText = callChatGPT_(prompt);
+    const connectionText = callChatGPT_(connectionPrompt).trim();
 
-    // resultText moet JSON zijn volgens prompt
-    const jsonStr = extractJsonObject_(resultText);
-    const obj = JSON.parse(jsonStr);
+    // ─── STAP 2: E-mail samenstellen in code ─────────────────────────
+    const subject = `Young Advisory Group x ${companyName}`;
 
-    // Schrijf output in Y (en eventueel X)
-    sheet.getRange(row, AI_MESSAGE_COL).setValue(`Onderwerp: ${obj.subject}\n\n${obj.message}`);
+    const message = [
+      `Beste ${firstName},`,
+      '',
+      `${opening} ${connectionText} Graag verken ik de mogelijkheden voor een samenwerking.`,
+      '',
+      companyPitch,
+      '',
+      signature
+    ].join('\n');
+
+    sheet.getRange(row, AI_MESSAGE_COL).setValue(`Onderwerp: ${subject}\n\n${message}`);
     sheet.getRange(row, AI_STATUS_COL).setValue('DONE');
+
   } catch (e) {
     sheet.getRange(row, AI_STATUS_COL).setValue('ERROR');
-    // Zet foutmelding in X zodat je ziet wat er mis ging
     sheet.getRange(row, AI_SUMMARY_COL).setValue(String(e));
     throw e;
   }

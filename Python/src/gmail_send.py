@@ -41,7 +41,7 @@ def render_email_body(row: pd.Series) -> str:
             "Heb je deze week 10 minuten voor een korte kennismaking?",
             "",
             "Groet,",
-            "Noah",
+            "Rick",
         ]
     )
 

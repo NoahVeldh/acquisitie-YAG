@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from src.acqlist import load_leads_from_excel, LeadColumns
 from src.gmail_auth import get_gmail_service
 from src.gmail_send import create_message, render_email_body, subject_from_template, send_one
-from src.storage import load_suppression, append_send_log
+from src.storage import load_suppression, append_suppression, append_send_log, load_do_not_contact, is_do_not_contact
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -45,13 +45,15 @@ def main() -> None:
     subject_template = os.getenv("SUBJECT_TEMPLATE", "Even kennismaken — {company}")
 
     # 1) Load leads
-    df = load_leads_from_excel(xlsx_path, sheet_name=None, columns=LeadColumns())
+    df = load_leads_from_excel(xlsx_path, sheet_name='Sheet1', columns=LeadColumns())
     if df.empty:
         print("Geen leads gevonden met geldige email_primary.")
         return
 
     # 2) suppression
     suppressed = load_suppression(suppression_path)
+    dnc_path = os.getenv("DNC_PATH", "Python/data/Niet Benaderen.xlsx")
+    do_not_contact = load_do_not_contact(dnc_path)   # <-- gooit error als bestand mist
 
     # 3) auth/service (alleen als niet dry-run)
     service = None
@@ -62,8 +64,19 @@ def main() -> None:
     sent_count = 0
     for _, row in df.iterrows():
         email = (row.get("email_primary") or "").strip().lower()
+        company = str(row.get("Company", "")).strip()
+
+        # ✅ STAP 1: niet-benaderen check — vóór alles
+        blocked, reason = is_do_not_contact(company, do_not_contact)
+        if blocked:
+            print(f"[DNC] Geblokkeerd: {company!r} ({email}) — matched: {reason!r}")
+            continue
+
+        # Stap 2: basis email validatie
         if not email or "@" not in email:
             continue
+
+        # Stap 3: email suppressie
         if email in suppressed:
             continue
 
@@ -81,12 +94,15 @@ def main() -> None:
                     "status": "DRY_RUN",
                     "message_id": "",
                     "error": "",
+                    "subject": subject,
+                    "body" : body,
                 },
             )
         else:
             try:
                 msg = create_message(sender_name=sender_name, to_addr=email, subject=subject, body_text=body)
                 message_id = send_one(service, user_id="me", message=msg)
+                append_suppression(suppression_path, email)
                 append_send_log(
                     send_log_path,
                     {
