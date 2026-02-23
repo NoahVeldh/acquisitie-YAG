@@ -1,19 +1,43 @@
+"""
+gmail_send.py — E-mail verzending via Gmail API
+
+Verantwoordelijkheden:
+  - E-mailbericht aanmaken (MIME)
+  - Versturen via Gmail API
+  - Rate limiting helpers
+"""
+
 from __future__ import annotations
 
 import base64
+import time
 from email.message import EmailMessage
-from typing import Any, Dict
-
-import pandas as pd
+from typing import Any
 
 
-def create_message(sender_name: str, to_addr: str, subject: str, body_text: str) -> Dict[str, str]:
+def create_message(
+    sender_name: str,
+    to_addr: str,
+    subject: str,
+    body_text: str,
+) -> dict[str, str]:
+    """
+    Maak een Gmail API message dict aan vanuit plain-text parameters.
+
+    Args:
+        sender_name: Naam die in de Van-header verschijnt
+        to_addr: Ontvanger e-mailadres
+        subject: Onderwerpregel
+        body_text: Plain-text body (newlines worden gerespecteerd)
+
+    Returns:
+        Dict met 'raw' key voor de Gmail API
+    """
     msg = EmailMessage()
-    # Let op: Gmail API bepaalt de daadwerkelijke From (account), maar naam kan via headers.
-    msg["To"] = to_addr
+    msg["To"]      = to_addr
     msg["Subject"] = subject
     if sender_name:
-        msg["From"] = sender_name
+        msg["From"] = sender_name   # Gmail gebruikt het ingelogde account, naam is display only
 
     msg.set_content(body_text)
 
@@ -21,38 +45,56 @@ def create_message(sender_name: str, to_addr: str, subject: str, body_text: str)
     return {"raw": raw}
 
 
-def render_email_body(row: pd.Series) -> str:
-    # Heel basic template; pas aan aan jouw tone of voice
-    first = (row.get("First Name") or "").strip()
-    company = (row.get("Company") or "").strip()
-    title = (row.get("Title") or "").strip()
+def send_one(service: Any, user_id: str, message: dict[str, str]) -> str:
+    """
+    Verstuur één bericht via de Gmail API.
 
-    greet = f"Hoi {first}," if first else "Hoi,"
-    line2 = f"Ik zag dat je werkzaam bent bij {company}." if company else "Ik kwam je profiel tegen."
-    line3 = f"In jouw rol als {title} leek het me interessant om even kennis te maken." if title else "Het leek me interessant om even kennis te maken."
+    Args:
+        service: Geauthenticeerde Gmail API service (van gmail_auth.get_gmail_service)
+        user_id: Meestal "me" (het ingelogde account)
+        message: Dict met 'raw' key (van create_message)
 
-    return "\n".join(
-        [
-            greet,
-            "",
-            line2,
-            line3,
-            "",
-            "Heb je deze week 10 minuten voor een korte kennismaking?",
-            "",
-            "Groet,",
-            "Rick",
-        ]
-    )
+    Returns:
+        Gmail message ID als string
 
-
-def send_one(service: Any, user_id: str, message: Dict[str, str]) -> str:
-    """Returns message id."""
+    Raises:
+        googleapiclient.errors.HttpError: Bij API fouten
+    """
     resp = service.users().messages().send(userId=user_id, body=message).execute()
     return str(resp.get("id", ""))
 
 
-def subject_from_template(template: str, row: pd.Series) -> str:
-    company = (row.get("Company") or "").strip()
-    # veilige format
-    return template.format(company=company or "jullie")
+def send_with_retry(
+    service: Any,
+    user_id: str,
+    message: dict[str, str],
+    max_retries: int = 3,
+    retry_delay: float = 5.0,
+) -> str:
+    """
+    Verstuur met automatische retry bij tijdelijke fouten (429, 503).
+
+    Returns:
+        Gmail message ID
+
+    Raises:
+        Exception: Na alle retries uitgeput
+    """
+    from googleapiclient.errors import HttpError
+
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return send_one(service, user_id, message)
+        except HttpError as e:
+            last_error = e
+            status = e.resp.status if e.resp else 0
+
+            if status in (429, 500, 503) and attempt < max_retries:
+                wait = retry_delay * attempt
+                print(f"[GMAIL] HTTP {status} — retry {attempt}/{max_retries} over {wait:.0f}s...")
+                time.sleep(wait)
+            else:
+                raise
+
+    raise last_error

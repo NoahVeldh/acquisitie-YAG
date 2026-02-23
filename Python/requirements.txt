@@ -1,7 +1,16 @@
-pandas
-openpyxl
-google-api-python-client
-google-auth
-google-auth-oauthlib
-google-auth-httplib2
-python-dotenv
+# Google
+gspread==6.1.2
+google-auth==2.29.0
+google-auth-oauthlib==1.2.0
+google-api-python-client==2.127.0
+
+# OpenAI
+openai>=1.30.0
+
+# HTTP (Lusha)
+requests>=2.31.0
+
+# Utils
+python-dotenv>=1.0.0
+pandas>=2.0.0
+openpyxl>=3.1.0
