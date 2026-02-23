@@ -98,7 +98,8 @@ def is_do_not_contact(company: str, dnc_set: set[str]) -> tuple[bool, str]:
 
     Twee lagen:
       1. Exacte match op alle genormaliseerde varianten van de lead
-      2. Substring-match: DNC-variant (≥5 tekens) zit in de lead of andersom
+      2. Substring-match: DNC-variant (≥8 tekens) zit in de lead of andersom,
+         mits geen generiek stopwoord.
 
     Returns:
         (True, matched_variant) als geblokkeerd, anders (False, "")
@@ -114,7 +115,6 @@ def is_do_not_contact(company: str, dnc_set: set[str]) -> tuple[bool, str]:
             return True, v
 
     # Laag 2: substring-match
-    # Stopwoorden die te generiek zijn om alleen een match te triggeren
     _STOPWORDS = {
         "groep", "group", "inter", "global", "solutions", "services",
         "management", "consulting", "holding", "international", "nederland",
@@ -124,7 +124,6 @@ def is_do_not_contact(company: str, dnc_set: set[str]) -> tuple[bool, str]:
 
     norm_lead = _normalize_company(company)
     for dnc_entry in dnc_set:
-        # Minimaal 8 tekens én geen stopwoord
         if len(dnc_entry) >= 8 and dnc_entry not in _STOPWORDS:
             if dnc_entry in norm_lead or norm_lead in dnc_entry:
                 return True, dnc_entry
@@ -133,21 +132,22 @@ def is_do_not_contact(company: str, dnc_set: set[str]) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
-# Suppressie (al verzonden / afgemeld e-mailadressen)
+# Suppressie (al verzonden e-mailadressen)
 # ---------------------------------------------------------------------------
 
 def append_suppression(path: str, email: str) -> None:
     """Voeg een email toe aan de suppressielijst zodat hij nooit nogmaals verstuurd wordt."""
     log_path = Path(path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     write_header = not log_path.exists() or log_path.stat().st_size == 0
-    
+
     with open(log_path, 'a', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=["email"])
+        writer = csv.DictWriter(f, fieldnames=["email"], quoting=csv.QUOTE_ALL)
         if write_header:
             writer.writeheader()
         writer.writerow({"email": email})
+
 
 def load_suppression(path: str) -> set[str]:
     """
@@ -173,13 +173,17 @@ def load_suppression(path: str) -> set[str]:
 # Send log
 # ---------------------------------------------------------------------------
 
-_SEND_LOG_FIELDS = ["email", "company", "title", "status", "message_id", "error", "subject", "body"]
+_SEND_LOG_FIELDS = [
+    "email", "company", "title", "consultant",
+    "status", "message_id", "error", "subject", "body",
+]
 
 
 def append_send_log(path: str, record: dict) -> None:
     """
     Voeg één record toe aan het send-log CSV-bestand.
     Maakt het bestand (inclusief header) aan als het nog niet bestaat.
+    QUOTE_ALL zorgt dat newlines en komma's in de body geen problemen geven.
     """
     log_path = Path(path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -187,7 +191,38 @@ def append_send_log(path: str, record: dict) -> None:
     write_header = not log_path.exists() or log_path.stat().st_size == 0
 
     with open(log_path, 'a', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=_SEND_LOG_FIELDS, extrasaction='ignore')
+        writer = csv.DictWriter(
+            f,
+            fieldnames=_SEND_LOG_FIELDS,
+            extrasaction='ignore',
+            quoting=csv.QUOTE_ALL,
+        )
         if write_header:
             writer.writeheader()
         writer.writerow(record)
+
+
+# ---------------------------------------------------------------------------
+# Bedrijven die al eerder benaderd zijn (uit send_log)
+# ---------------------------------------------------------------------------
+
+def load_contacted_companies(path: str) -> set[str]:
+    """
+    Laad alle bedrijven die al eerder benaderd zijn vanuit het send_log.
+    Zo worden collega's van hetzelfde bedrijf automatisch geskipt.
+    Alleen SENT-regels tellen mee, geen DRY_RUN of ERROR.
+    """
+    if not os.path.exists(path):
+        return set()
+
+    companies: set[str] = set()
+    with open(path, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if (row.get("status") or "").strip() == "SENT":
+                company = (row.get("company") or "").strip().lower()
+                if company:
+                    companies.add(company)
+
+    print(f"[COMPANIES] {len(companies)} bedrijven al eerder benaderd.")
+    return companies
