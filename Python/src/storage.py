@@ -1,3 +1,13 @@
+"""
+storage.py — Lokale opslag: DNC lijst, suppressie en send-log
+
+De sheet is de primary source of truth voor leads en statussen.
+Deze module beheert de lokale veiligheidslagen:
+  - DNC (Do Not Contact): bedrijven die nooit benaderd mogen worden
+  - Suppressie: e-mailadressen die al een mail ontvangen hebben
+  - Send log: volledige audit trail van alle verzendpogingen
+"""
+
 from __future__ import annotations
 
 import csv
@@ -8,13 +18,13 @@ from pathlib import Path
 import pandas as pd
 
 
-# ---------------------------------------------------------------------------
-# DNC helpers (privé)
-# ---------------------------------------------------------------------------
+# ══════════════════════════════════════════════════════════════════════════
+# DNC — Do Not Contact
+# ══════════════════════════════════════════════════════════════════════════
 
 def _normalize_company(name: str) -> str:
     """
-    Zet een bedrijfsnaam om naar een genormaliseerde string:
+    Normaliseer een bedrijfsnaam voor vergelijking:
     - lowercase
     - verwijder juridische vormen (B.V., NV, BV, VOF, Ltd, ...)
     - verwijder leestekens → spaties
@@ -32,13 +42,11 @@ def _normalize_company(name: str) -> str:
 
 def _extract_variants(raw: str) -> set[str]:
     """
-    Geeft alle zinvolle varianten van een bedrijfsnaam terug.
+    Geef alle zinvolle varianten van een bedrijfsnaam terug.
 
     Voorbeelden:
       "Nabuurs - supply chain solutions" → {"nabuurs", "supply chain solutions", ...}
       "Melkweg|Fritom"                   → {"melkweg", "fritom", "melkweg fritom"}
-      "Core Connect; boutique fulfilment" → {"core connect", "boutique fulfilment", ...}
-      "Sanbio B.V."                      → {"sanbio"}
     """
     variants: set[str] = set()
     variants.add(_normalize_company(raw))
@@ -53,22 +61,18 @@ def _extract_variants(raw: str) -> set[str]:
     return {v for v in variants if v}
 
 
-# ---------------------------------------------------------------------------
-# DNC: laden en checken
-# ---------------------------------------------------------------------------
-
 def load_do_not_contact(path: str) -> set[str]:
     """
-    Laad het 'Niet Benaderen' Excel-bestand en retourneer een set van
-    alle genormaliseerde bedrijfsnaam-varianten.
+    Laad het 'Niet Benaderen' Excel-bestand.
+    Retourneert een set van alle genormaliseerde bedrijfsnaam-varianten.
 
-    Gooit een FileNotFoundError als het bestand niet bestaat — het script
-    mag nooit draaien zonder een geldige DNC-lijst.
+    Gooit een FileNotFoundError als het bestand niet bestaat —
+    het script mag NOOIT draaien zonder geldige DNC-lijst.
     """
     if not os.path.exists(path):
         raise FileNotFoundError(
-            f"[KRITIEK] Niet-benaderen bestand niet gevonden: {path}\n"
-            "Zet DNC_PATH correct in je .env of geef het juiste pad op."
+            f"[KRITIEK] DNC-bestand niet gevonden: {path}\n"
+            "Zet DNC_PATH correct in .env of geef het juiste pad op."
         )
 
     if path.lower().endswith('.csv'):
@@ -92,14 +96,21 @@ def load_do_not_contact(path: str) -> set[str]:
     return dnc_set
 
 
+_STOPWORDS = {
+    "groep", "group", "inter", "global", "solutions", "services",
+    "management", "consulting", "holding", "international", "nederland",
+    "netherlands", "europe", "digital", "partners", "innovations",
+    "systems", "logistics", "supply", "chain", "media", "tech",
+}
+
+
 def is_do_not_contact(company: str, dnc_set: set[str]) -> tuple[bool, str]:
     """
-    Controleer of een bedrijfsnaam op de niet-benaderen lijst staat.
+    Controleer of een bedrijfsnaam op de DNC-lijst staat.
 
     Twee lagen:
       1. Exacte match op alle genormaliseerde varianten van de lead
-      2. Substring-match: DNC-variant (≥8 tekens) zit in de lead of andersom,
-         mits geen generiek stopwoord.
+      2. Substring-match: DNC-variant (≥8 tekens) zit in de lead of andersom
 
     Returns:
         (True, matched_variant) als geblokkeerd, anders (False, "")
@@ -109,18 +120,9 @@ def is_do_not_contact(company: str, dnc_set: set[str]) -> tuple[bool, str]:
 
     lead_variants = _extract_variants(company)
 
-    # Laag 1: exacte match
     for v in lead_variants:
         if v in dnc_set:
             return True, v
-
-    # Laag 2: substring-match
-    _STOPWORDS = {
-        "groep", "group", "inter", "global", "solutions", "services",
-        "management", "consulting", "holding", "international", "nederland",
-        "netherlands", "europe", "digital", "partners", "innovations",
-        "systems", "logistics", "supply", "chain", "media", "tech",
-    }
 
     norm_lead = _normalize_company(company)
     for dnc_entry in dnc_set:
@@ -131,27 +133,13 @@ def is_do_not_contact(company: str, dnc_set: set[str]) -> tuple[bool, str]:
     return False, ""
 
 
-# ---------------------------------------------------------------------------
-# Suppressie (al verzonden e-mailadressen)
-# ---------------------------------------------------------------------------
-
-def append_suppression(path: str, email: str) -> None:
-    """Voeg een email toe aan de suppressielijst zodat hij nooit nogmaals verstuurd wordt."""
-    log_path = Path(path)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    write_header = not log_path.exists() or log_path.stat().st_size == 0
-
-    with open(log_path, 'a', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=["email"], quoting=csv.QUOTE_ALL)
-        if write_header:
-            writer.writeheader()
-        writer.writerow({"email": email})
-
+# ══════════════════════════════════════════════════════════════════════════
+# Suppressie — al verzonden e-mailadressen
+# ══════════════════════════════════════════════════════════════════════════
 
 def load_suppression(path: str) -> set[str]:
     """
-    Laad de suppressielijst (CSV met een kolom 'email').
+    Laad de suppressielijst (CSV met kolom 'email').
     Geeft een lege set terug als het bestand niet bestaat.
     """
     if not os.path.exists(path):
@@ -165,30 +153,50 @@ def load_suppression(path: str) -> set[str]:
             if email:
                 suppressed.add(email)
 
-    print(f"[SUPPRESSION] {len(suppressed)} e-mailadressen geladen uit {path}")
+    print(f"[SUPPRESSION] {len(suppressed)} e-mailadressen geladen.")
     return suppressed
 
 
-# ---------------------------------------------------------------------------
-# Send log
-# ---------------------------------------------------------------------------
+def append_suppression(path: str, email: str) -> None:
+    """Voeg een email toe aan de suppressielijst."""
+    log_path = Path(path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    write_header = not log_path.exists() or log_path.stat().st_size == 0
+
+    with open(log_path, 'a', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=["email"], quoting=csv.QUOTE_ALL)
+        if write_header:
+            writer.writeheader()
+        writer.writerow({"email": email.strip().lower()})
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Send log — volledige audit trail
+# ══════════════════════════════════════════════════════════════════════════
 
 _SEND_LOG_FIELDS = [
-    "email", "company", "title", "consultant",
-    "status", "message_id", "error", "subject", "body",
+    "timestamp", "email", "company", "first_name", "job_title",
+    "consultant", "vestiging", "status", "message_id", "error",
+    "subject", "body",
 ]
 
 
 def append_send_log(path: str, record: dict) -> None:
     """
-    Voeg één record toe aan het send-log CSV-bestand.
+    Voeg één record toe aan het send-log CSV.
     Maakt het bestand (inclusief header) aan als het nog niet bestaat.
-    QUOTE_ALL zorgt dat newlines en komma's in de body geen problemen geven.
+    QUOTE_ALL zodat newlines en komma's in de body geen problemen geven.
     """
+    from datetime import datetime
+
     log_path = Path(path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     write_header = not log_path.exists() or log_path.stat().st_size == 0
+
+    if "timestamp" not in record:
+        record["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     with open(log_path, 'a', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(
@@ -202,15 +210,10 @@ def append_send_log(path: str, record: dict) -> None:
         writer.writerow(record)
 
 
-# ---------------------------------------------------------------------------
-# Bedrijven die al eerder benaderd zijn (uit send_log)
-# ---------------------------------------------------------------------------
-
 def load_contacted_companies(path: str) -> set[str]:
     """
-    Laad alle bedrijven die al eerder benaderd zijn vanuit het send_log.
-    Zo worden collega's van hetzelfde bedrijf automatisch geskipt.
-    Alleen SENT-regels tellen mee, geen DRY_RUN of ERROR.
+    Laad alle bedrijven die al eerder benaderd zijn (status=SENT).
+    Voorkomt dat collega's van hetzelfde bedrijf ook een mail krijgen.
     """
     if not os.path.exists(path):
         return set()
