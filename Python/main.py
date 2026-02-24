@@ -785,7 +785,16 @@ def step_overview(cfg: dict, sheet) -> None:
         print(f"    {k:<20} {v}")
 
     if total_tokens > 0:
+        # gpt-4.1-mini: $0.40/1M input, $1.60/1M output tokens
+        # Schatting: ~80% input / ~20% output voor deze use case (grote prompts, kleine output)
+        # USD/EUR wisselkoers: 1 USD = €0.8492 (xe.com, 24-02-2026)
+        _BLENDED_USD_PER_TOKEN = (0.80 * 0.40 + 0.20 * 1.60) / 1_000_000  # $0.64 per 1M
+        _USD_TO_EUR = 0.8492
+        cost_usd = total_tokens * _BLENDED_USD_PER_TOKEN
+        cost_eur = cost_usd * _USD_TO_EUR
         print(f"\n  AI Tokenverbruik (cumulatief in sheet): {total_tokens:,} tokens")
+        print(f"  Geschatte kosten:                       €{cost_eur:.2f}"
+              f"  (${cost_usd:.4f}, blended $0.64/1M, koers €0.8492)")
 
     print(f"\n  Config:")
     print(f"    Consultant: {cfg['sender_name']}")

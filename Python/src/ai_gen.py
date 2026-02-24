@@ -11,15 +11,17 @@ Verantwoordelijkheden:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 WIJZIGING T.O.V. VORIGE VERSIE:
 
-  generate() geeft nu een tuple terug: (bericht: str, tokens: int)
-    - tokens = input_tokens + output_tokens uit de OpenAI response
-    - Bij dry-run / preview geeft preview() een tuple terug met tokens=0
-    - Zo kan main.py het tokenverbruik per rij opslaan in de sheet (kolom Z)
+  URL-stripping toegevoegd als post-processing stap
+    - _strip_urls() verwijdert alle URLs en losse domeinnamen uit de gegenereerde tekst
+    - Pakt: https://..., http://..., www.bedrijf.nl, bedrijf.com/pad etc.
+    - Wordt aangeroepen direct na _generate_connection_sentences()
+    - Dubbele spaties en spaties voor leestekens worden automatisch opgeruimd
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 from __future__ import annotations
 
+import re
 from openai import OpenAI
 
 
@@ -58,6 +60,44 @@ Torenallee 20
 5617 BC Eindhoven
 {sender_phone}
 {sender_email} | Linkedin www.youngadvisorygroup.nl"""
+
+
+# ── URL stripper ──────────────────────────────────────────────────────────
+
+# Patronen die worden verwijderd:
+#   1. Volledige URLs: https://..., http://...
+#   2. www.iets.tld (met of zonder pad)
+#   3. Losse domeinnamen: bedrijf.nl, bedrijf.com/pad (minimaal 2-char tld)
+#      — alleen als ze NIET in de vaste signature staan (die wordt na assembly toegevoegd)
+_URL_PATTERN = re.compile(
+    r"(?:"
+    r"https?://[^\s\)\]\,]+"           # http(s)://...
+    r"|www\.[^\s\)\]\,]+"              # www.iets.nl
+    r"|[a-zA-Z0-9\-]+\.[a-zA-Z]{2,}"  # bedrijf.nl / bedrijf.com
+    r"(?:/[^\s\)\]\,]*)?"              # optioneel pad
+    r")",
+    re.IGNORECASE,
+)
+
+# Leestekens die na verwijdering direct naast een spatie komen te staan
+_PUNCT_SPACE = re.compile(r"\s+([,\.;:!?])")
+
+
+def _strip_urls(text: str) -> str:
+    """
+    Verwijder alle URLs en losse domeinnamen uit tekst.
+    Ruimt daarna ook markdown-link skeletten op die overblijven na URL-verwijdering,
+    zoals ([.com]()), ([tekst]()) of losse lege haakjes.
+    Ruimt daarna dubbele spaties en spaties voor leestekens op.
+    """
+    cleaned = _URL_PATTERN.sub("", text)
+    cleaned = re.sub(r"\(\[.*?\]\(\s*\)\)", "", cleaned)   # ([tekst]())
+    cleaned = re.sub(r"\[.*?\]\(\s*\)", "", cleaned)          # [tekst]()
+    cleaned = re.sub(r"\(\s*\)", "", cleaned)                    # lege () haakjes
+    cleaned = _PUNCT_SPACE.sub(r"\1", cleaned)                    # spatie voor leesteken weg
+    cleaned = re.sub(r" {2,}", " ", cleaned)                       # dubbele spaties -> een
+    cleaned = "\n".join(line.strip() for line in cleaned.splitlines())
+    return cleaned.strip()
 
 
 # ── AI Client ─────────────────────────────────────────────────────────────
@@ -106,10 +146,10 @@ class AIGenerator:
         """
         Genereer een volledig e-mailbericht voor één lead.
         Als use_web_search=True zoekt OpenAI zelf op wat het bedrijf doet.
+        URLs worden na generatie automatisch uit de connectiezinnen verwijderd.
 
         Returns:
             (bericht, tokens) — de volledige mail-tekst en het totale tokenverbruik
-            tokens = input_tokens + output_tokens uit de OpenAI response
         """
         if not company_name:
             raise ValueError("company_name is verplicht voor AI generatie")
@@ -122,6 +162,9 @@ class AIGenerator:
             company_name=company_name,
             website=website,
         )
+
+        # Verwijder URLs die het model toch heeft toegevoegd
+        connection_text = _strip_urls(connection_text)
 
         bericht = self._assemble_email(
             first_name=first_name,
