@@ -59,7 +59,7 @@ Videolab
 Torenallee 20
 5617 BC Eindhoven
 {sender_phone}
-{sender_email} | Linkedin www.youngadvisorygroup.nl"""
+{sender_email} | LinkedIn | www.youngadvisorygroup.nl"""
 
 
 # ── URL stripper ──────────────────────────────────────────────────────────
@@ -110,6 +110,7 @@ class AIGenerator:
         sender_name: str = "",
         sender_email: str = "",
         sender_phone: str = "",
+        sender_linkedin: str = "www.youngadvisorygroup.nl",
         studie: str = "Technische Bedrijfskunde",
         universiteit: str = "TU Eindhoven",
         opening_template: str = DEFAULT_OPENING,
@@ -125,6 +126,7 @@ class AIGenerator:
         self.sender           = sender_name
         self.email            = sender_email
         self.phone            = sender_phone
+        self.linkedin         = sender_linkedin
         self.studie           = studie
         self.universiteit     = universiteit
         self.use_web_search   = use_web_search
@@ -284,6 +286,7 @@ Geef ALLEEN de 2-3 zinnen terug, niets anders.
             sender_name=self.sender,
             sender_email=self.email,
             sender_phone=self.phone,
+            sender_linkedin=self.linkedin,
             vestiging=vestiging or "Eindhoven-Tilburg",
         )
 

@@ -226,6 +226,7 @@ def _load_config() -> dict:
         "sender_name":         _env("SENDER_NAME"),
         "sender_email":        _env("SENDER_EMAIL"),
         "sender_phone":        _env("SENDER_PHONE"),
+        "sender_linkedin":    _env("SENDER_LINKEDIN", "www.linkedin.com/in/"),
         "studie":              _env("STUDIE", "Technische Bedrijfskunde"),
         "universiteit":        _env("UNIVERSITEIT", "TU Eindhoven"),
         "subject_template":    _env("SUBJECT_TEMPLATE", "Young Advisory Group x {company}"),
@@ -532,6 +533,7 @@ def step_ai_generate(cfg: dict, sheet) -> None:
             sender_name=cfg["sender_name"],
             sender_email=cfg["sender_email"],
             sender_phone=cfg["sender_phone"],
+            sender_linkedin=cfg["sender_linkedin"],
             studie=cfg["studie"],
             universiteit=cfg["universiteit"],
         )
@@ -709,6 +711,9 @@ def step_send_mail(cfg: dict, sheet) -> None:
                     to_addr=email,
                     subject=subject,
                     body_text=body,
+                    sender_phone=cfg["sender_phone"],
+                    sender_linkedin=cfg["sender_linkedin"],
+                    vestiging=row[Col.VESTIGING] or cfg["vestiging_default"],
                 )
                 set_mail_status(sheet, row["row_number"], MailStatus.SENT, message_id=message_id)
                 append_send_log_sheet(sheet.spreadsheet, {
