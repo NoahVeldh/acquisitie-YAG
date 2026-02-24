@@ -1,17 +1,28 @@
 # Python
 __pycache__/
 *.pyc
+*.pyo
 .venv/
+venv/
+env/
+
+# Root .env (wordt niet meer gebruikt, consultants/ map is leidend)
 .env
 
-# OAuth / credentials
-Python/credentials/
-credentials.json
-token.json
+# Consultant profielen (bevatten API keys — nooit committen!)
+consultants/*.env
+!consultants/.env.example
 
-# Output/logs (PII)
-Python/output/
+# Google credentials (nooit committen!)
+credentials/
+*.json
+
+# Output / logs (bevatten PII)
+output/
 *.csv
+
+# DNC data
+data/
 
 # IDE
 .vscode/

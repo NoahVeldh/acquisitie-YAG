@@ -5,16 +5,17 @@ Gebruik:
     python main.py
 
 Vereisten:
-    - .env ingevuld (zie .env.example)
+    - consultants/<naam>.env per consultant (zie .env.example)
     - credentials/service_account.json (voor Google Sheets)
-    - credentials/credentials.json (voor Gmail OAuth)
+    - credentials/<naam>_credentials.json (voor Gmail OAuth, per consultant)
     - data/Niet Benaderen.xlsx (DNC lijst)
 
 Flow:
-    1. Leads ophalen via Lusha
-    2. Leads enrichen (email / telefoon / LinkedIn)
-    3. AI berichten genereren → terugschrijven naar Sheet
-    4. Mails versturen (dry-run of echt)
+    1. Kies consultant → laadt automatisch het juiste .env bestand
+    2. Leads ophalen via Lusha
+    3. Leads enrichen (email / telefoon / LinkedIn)
+    4. AI berichten genereren → terugschrijven naar Sheet
+    5. Mails versturen (dry-run of echt)
 """
 
 from __future__ import annotations
@@ -22,11 +23,126 @@ from __future__ import annotations
 import os
 import sys
 import time
+from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv, dotenv_values
 
-# ── Laad .env vroeg zodat alles beschikbaar is ────────────────────────────
-load_dotenv()
+
+# ══════════════════════════════════════════════════════════════════════════
+# Consultant selectie — wordt uitgevoerd vóór alles
+# ══════════════════════════════════════════════════════════════════════════
+
+CONSULTANTS_DIR = Path("consultants")
+
+
+def _load_consultant_env() -> str:
+    """
+    Zoek alle .env bestanden in de consultants/ map, laat de gebruiker
+    kiezen en laad het juiste bestand. Geeft de naam van de consultant terug.
+
+    Bestandsnaamconventie: consultants/<voornaam>.env
+    Voorbeeld:             consultants/rick.env
+    """
+    CONSULTANTS_DIR.mkdir(exist_ok=True)
+
+    env_files = sorted(CONSULTANTS_DIR.glob("*.env"))
+
+    print("═" * 50)
+    print("  YAG Acquisitie Tool")
+    print("═" * 50)
+    print()
+
+    if not env_files:
+        print("  ⚠ Geen consultant profielen gevonden in consultants/")
+        print(f"  Maak een bestand aan via: cp .env.example consultants/jounaam.env")
+        print(f"  En vul het in met jouw gegevens.\n")
+        sys.exit(1)
+
+    # Lees SENDER_NAME uit elk .env bestand voor een nette weergave
+    profiles: list[tuple[Path, str]] = []
+    for env_file in env_files:
+        values = dotenv_values(env_file)
+        display_name = values.get("SENDER_NAME", env_file.stem.capitalize())
+        vestiging    = values.get("VESTIGING_DEFAULT", "")
+        label = f"{display_name}" + (f"  ({vestiging})" if vestiging else "")
+        profiles.append((env_file, label))
+
+    print("  Wie ben je?\n")
+    for i, (_, label) in enumerate(profiles, 1):
+        print(f"    [{i}] {label}")
+    print(f"    [n] Nieuw profiel aanmaken")
+    print()
+
+    while True:
+        raw = input("  > ").strip().lower()
+
+        if raw == "n":
+            _create_new_profile()
+            # Herstart zodat het nieuwe profiel in de lijst verschijnt
+            print("\n  Profiel aangemaakt. Herstart het script.\n")
+            sys.exit(0)
+
+        if raw.isdigit() and 1 <= int(raw) <= len(profiles):
+            chosen_file, chosen_label = profiles[int(raw) - 1]
+            load_dotenv(chosen_file, override=True)
+            print(f"\n  ✅ Ingelogd als: {chosen_label}\n")
+            return chosen_label
+
+        print(f"  Ongeldige keuze. Vul een getal in van 1 t/m {len(profiles)} of 'n'.")
+
+
+def _create_new_profile() -> None:
+    """Interactief een nieuw consultant profiel aanmaken."""
+    print("\n  ── Nieuw profiel aanmaken ──────────────────────")
+
+    voornaam     = input("  Voornaam (voor bestandsnaam, geen spaties): ").strip().lower()
+    sender_name  = input("  Volledige naam (bijv. Rick op het Veld): ").strip()
+    sender_email = input("  E-mailadres: ").strip()
+    sender_phone = input("  Telefoonnummer: ").strip()
+    studie       = input("  Studie [Technische Bedrijfskunde]: ").strip() or "Technische Bedrijfskunde"
+    universiteit = input("  Universiteit [TU Eindhoven]: ").strip() or "TU Eindhoven"
+    vestiging    = input("  Vestiging (bijv. Eindhoven, Tilburg): ").strip()
+
+    if not voornaam or not sender_email:
+        print("  ❌ Voornaam en e-mailadres zijn verplicht.")
+        return
+
+    # Lees het .env.example als basis
+    example_path = Path(".env.example")
+    if example_path.exists():
+        template = example_path.read_text(encoding="utf-8")
+
+    # Vervang de placeholders
+    filled = (
+        template
+        .replace("Rick op het Veld",                   sender_name)
+        .replace("rick.ophetveld@youngadvisorygroup.nl", sender_email)
+        .replace("+31 6 42 48 16 27",                  sender_phone)
+        .replace("Technische Bedrijfskunde",            studie)
+        .replace("TU Eindhoven",                        universiteit)
+    )
+
+    # Voeg vestiging toe als extra variabele
+    if vestiging and "VESTIGING_DEFAULT" not in filled:
+        filled += f"\nVESTIGING_DEFAULT={vestiging}\n"
+
+    # Zet token pad uniek per consultant
+    token_path = f"credentials/token_{voornaam}.json"
+    filled = filled.replace(
+        "TOKEN_JSON=credentials/token.json",
+        f"TOKEN_JSON={token_path}",
+    )
+
+    output_path = CONSULTANTS_DIR / f"{voornaam}.env"
+    output_path.write_text(filled, encoding="utf-8")
+    print(f"\n  ✅ Profiel opgeslagen: {output_path}")
+    print(f"  ℹ  Token pad: {token_path}  (wordt aangemaakt bij eerste Gmail login)")
+
+
+
+
+# ── Laad consultant profiel VOOR alle andere imports ──────────────────────
+_active_consultant = _load_consultant_env()
 
 from src.config import Col, AIStatus, MailStatus
 from src.sheets import (
@@ -43,8 +159,7 @@ from src.storage import (
     load_suppression, append_suppression,
     append_send_log, load_contacted_companies,
 )
-from src.gmail_auth import get_gmail_service
-from src.gmail_send import create_message, send_with_retry
+from src.gmail_send import send_email, verify_connection
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -77,6 +192,7 @@ def _separator(char: str = "━", width: int = 50) -> None:
 def _header(title: str) -> None:
     _separator()
     print(f"  {title}")
+
     _separator()
 
 
@@ -103,31 +219,40 @@ def _load_config() -> dict:
     """Laad en valideer alle configuratie uit .env."""
     config = {
         # Sheets
-        "spreadsheet_id":    _env("SPREADSHEET_ID"),
-        "worksheet_name":    _env("WORKSHEET_NAME", "Sheet1"),
-        "service_account":   _env("SERVICE_ACCOUNT_JSON", "credentials/service_account.json"),
-        # Gmail
-        "credentials_json":  _env("CREDENTIALS_JSON", "credentials/credentials.json"),
-        "token_json":        _env("TOKEN_JSON", "credentials/token.json"),
+        "spreadsheet_id":     _env("SPREADSHEET_ID"),
+        "worksheet_name":     _env("WORKSHEET_NAME", "Sheet1"),
+        "service_account":    _env("SERVICE_ACCOUNT_JSON", "credentials/service_account.json"),
+        # Gmail SMTP (App Password — geen OAuth nodig)
+        "gmail_app_password": _env("GMAIL_APP_PASSWORD"),
         # Lusha
-        "lusha_api_key":     _env("LUSHA_API_KEY"),
+        "lusha_api_key":      _env("LUSHA_API_KEY"),
         # OpenAI
-        "openai_api_key":    _env("OPENAI_API_KEY"),
+        "openai_api_key":     _env("OPENAI_API_KEY"),
         # Consultant
-        "sender_name":       _env("SENDER_NAME"),
-        "sender_email":      _env("SENDER_EMAIL"),
-        "sender_phone":      _env("SENDER_PHONE"),
-        "studie":            _env("STUDIE", "Technische Bedrijfskunde"),
-        "universiteit":      _env("UNIVERSITEIT", "TU Eindhoven"),
-        "subject_template":  _env("SUBJECT_TEMPLATE", "Young Advisory Group x {company}"),
+        "sender_name":        _env("SENDER_NAME"),
+        "sender_email":       _env("SENDER_EMAIL"),
+        "sender_phone":       _env("SENDER_PHONE"),
+        "studie":             _env("STUDIE", "Technische Bedrijfskunde"),
+        "universiteit":       _env("UNIVERSITEIT", "TU Eindhoven"),
+        "subject_template":   _env("SUBJECT_TEMPLATE", "Young Advisory Group x {company}"),
         # Run
-        "dry_run":           _env_bool("DRY_RUN", True),
-        "max_emails":        _env_int("MAX_EMAILS", 20),
-        "rate_limit_sec":    float(_env("RATE_LIMIT_SEC", "2")),
+        "dry_run":            _env_bool("DRY_RUN", True),
+        "max_emails":         _env_int("MAX_EMAILS", 20),
+        "rate_limit_sec":     float(_env("RATE_LIMIT_SEC", "2")),
         # Paden
-        "suppression_path":  _env("SUPPRESSION_PATH", "output/suppression.csv"),
-        "send_log_path":     _env("SEND_LOG_PATH", "output/send_log.csv"),
-        "dnc_path":          _env("DNC_PATH", "data/Niet Benaderen.xlsx"),
+        "suppression_path":   _env("SUPPRESSION_PATH", "output/suppression.csv"),
+        "send_log_path":      _env("SEND_LOG_PATH", "output/send_log.csv"),
+        "dnc_path":           _env("DNC_PATH", "data/Niet Benaderen.xlsx"),
+        # Meta-veld defaults (vooringevuld bij Lusha stap)
+        "vestiging_default":   _env("VESTIGING_DEFAULT", "Eindhoven-Tilburg"),
+        "type_default":        _env("TYPE_DEFAULT", "Cold"),
+        "gevallen_default":    _env("GEVALLEN_DEFAULT", ""),
+        "hoe_contact_default": _env("HOE_CONTACT_DEFAULT", "Lusha"),
+        # Lusha industrie default (lijst van IDs, leeg = alle industrieën)
+        "industry_ids_default": [
+            int(x.strip()) for x in _env("INDUSTRY_IDS_DEFAULT", "").split(",")
+            if x.strip().isdigit()
+        ],
     }
 
     errors = []
@@ -137,12 +262,14 @@ def _load_config() -> dict:
         errors.append("SENDER_NAME ontbreekt in .env")
     if not config["sender_email"]:
         errors.append("SENDER_EMAIL ontbreekt in .env")
+    if not config["gmail_app_password"] and not config["dry_run"]:
+        errors.append("GMAIL_APP_PASSWORD ontbreekt — vereist voor echte verzending")
 
     if errors:
         print("\n[CONFIG] ❌ Configuratie onvolledig:")
         for e in errors:
             print(f"  • {e}")
-        print("\nVul .env in op basis van .env.example en herstart.")
+        print("\nVul consultants/<naam>.env in op basis van consultants/.env.example en herstart.")
         sys.exit(1)
 
     return config
@@ -157,14 +284,14 @@ def step_lusha_search(cfg: dict, sheet) -> None:
 
     lusha = LushaClient(cfg["lusha_api_key"])
 
-    # ICP kiezen
+    # ── ICP kiezen ────────────────────────────────────────────────────────
     print("\nWelk ICP profiel wil je gebruiken?")
     preset_keys = list(ICP_PRESETS.keys()) + ["Eigen filters"]
     choice = _pick(preset_keys)
 
     if choice < len(ICP_PRESETS):
         preset_name = preset_keys[choice]
-        filters = ICP_PRESETS[preset_name]
+        filters = dict(ICP_PRESETS[preset_name])   # kopie zodat we kunnen aanpassen
         print(f"\n  Preset: {preset_name}")
     else:
         print("\n  (Voer je eigen filters in)")
@@ -176,18 +303,70 @@ def step_lusha_search(cfg: dict, sheet) -> None:
             "job_titles":    [t.strip() for t in input("  Functietitels (kommagescheiden): ").split(",")],
         }
 
-    num_pages = int(input("\nHoeveel pagina's ophalen? (1 pagina = 10 leads): ") or "1")
-    start_page = int(input("Startpagina: ") or "1")
+    # ── Industrie kiezen / bevestigen ─────────────────────────────────────
+    default_industry_ids = cfg.get("industry_ids_default", [])
+    current_ids = filters.get("industry_ids") or default_industry_ids
 
-    # Consultant meta
-    print("\nVul de verplichte meta-velden in voor deze batch:")
-    consultant = input(f"  Consultant naam [{cfg['sender_name']}]: ").strip() or cfg["sender_name"]
-    vestiging  = input("  Vestiging (bijv. Eindhoven, Tilburg): ").strip()
-    type_      = input("  Type (bijv. Cold, Warm, Referral): ").strip()
-    gevallen   = input("  Gevallen/sector (bijv. Logistiek, Zorg): ").strip()
-    hoe_contact= input("  Hoe contact (bijv. Lusha, LinkedIn): ").strip() or "Lusha"
+    # Haal industrie-namen op voor weergave
+    def _ids_to_label(ids, industry_list):
+        if not ids:
+            return "Alle industrieën"
+        names = []
+        for ind in industry_list:
+            if ind["main_industry_id"] in ids:
+                names.append(ind["main_industry"])
+        return ", ".join(names) if names else str(ids)
 
-    print(f"\n[LUSHA] Ophalen: {num_pages} pagina('s) vanaf pagina {start_page}...")
+    print(f"\n  Industrie: ", end="")
+    industry_list = []
+    try:
+        industry_list = lusha.get_industries()
+        current_label = _ids_to_label(current_ids, industry_list)
+        print(current_label)
+    except Exception:
+        print(str(current_ids) if current_ids else "Alle (kon niet ophalen)")
+
+    if _confirm("  Industrie wijzigen? (j/n): "):
+        if not industry_list:
+            print("  [LUSHA] Kon industrieënlijst niet ophalen.")
+        else:
+            print()
+            for ind in industry_list:
+                print(f"    [{ind['main_industry_id']:>3}] {ind['main_industry']}")
+            raw = input("\n  Geef één of meer IDs op (kommagescheiden, Enter = alle): ").strip()
+            if raw:
+                current_ids = [int(x.strip()) for x in raw.split(",") if x.strip().isdigit()]
+                print(f"  ✅ Industrie ingesteld: {_ids_to_label(current_ids, industry_list)}")
+            else:
+                current_ids = []
+                print("  ✅ Alle industrieën")
+
+    filters["industry_ids"] = current_ids
+
+    # ── Pagina's — willekeurige startpagina om duplicaten te voorkomen ──────
+    import random
+    random_page = random.randint(1, 50)
+
+    num_pages = 1
+    print(f"\n  Startpagina: {random_page} (willekeurig)")
+    override = input(f"  Andere startpagina? (Enter = {random_page}, of typ getal): ").strip()
+    start_page = int(override) if override.isdigit() else random_page
+
+    # ── Meta-velden ───────────────────────────────────────────────────────
+    default_vestiging   = cfg.get("vestiging_default", "Eindhoven-Tilburg")
+    default_type        = cfg.get("type_default", "Koud contact")
+    default_gevallen    = cfg.get("gevallen_default", "")
+    default_hoe_contact = cfg.get("hoe_contact_default", "Lusha")
+
+    print(f"\nMeta-velden (Enter = standaardwaarde overnemen):")
+    consultant  = input(f"  Consultant      [{cfg['sender_name']}]: ").strip() or cfg["sender_name"]
+    vestiging   = input(f"  Vestiging       [{default_vestiging}]: ").strip() or default_vestiging
+    type_       = input(f"  Type            [{default_type}]: ").strip() or default_type
+    gevallen    = input(f"  Gevallen/sector [{default_gevallen or 'leeg'}]: ").strip() or default_gevallen
+    hoe_contact = input(f"  Hoe contact     [{default_hoe_contact}]: ").strip() or default_hoe_contact
+
+    # ── Ophalen ───────────────────────────────────────────────────────────
+    print(f"\n[LUSHA] Ophalen: {num_pages} pagina(\'s) vanaf pagina {start_page}...")
     contacts, request_id = lusha.search_multiple_pages(
         num_pages=num_pages,
         start_page=start_page,
@@ -225,6 +404,38 @@ def step_lusha_search(cfg: dict, sheet) -> None:
     )
     print(f"[LUSHA] ✅ {added} leads toegevoegd aan de sheet.")
 
+    # ── DNC scan direct na toevoegen ──────────────────────────────────────
+    print("\n[DNC] DNC-lijst controleren op nieuwe leads...")
+    try:
+        dnc_set = load_do_not_contact(cfg["dnc_path"])
+    except FileNotFoundError as e:
+        print(f"[DNC] ⚠ {e}")
+        print("[DNC] DNC-check overgeslagen — zet DNC_PATH correct in .env")
+        return
+
+    all_rows   = get_all_rows(sheet)
+    dnc_marked = 0
+
+    for row in all_rows:
+        company     = row[Col.COMPANY]
+        mail_status = row[Col.MAIL_STATUS]
+
+        # Alleen rijen die net zijn toegevoegd (PENDING) en nog geen status hebben
+        if mail_status not in ("", "PENDING"):
+            continue
+
+        blocked, matched = is_do_not_contact(company, dnc_set)
+        if blocked:
+            set_mail_status(sheet, row["row_number"], MailStatus.DNC)
+            print(f"  🚫 DNC: {company}  (match: '{matched}')")
+            dnc_marked += 1
+
+    if dnc_marked:
+        print(f"[DNC] {dnc_marked} lead(s) gemarkeerd als 🚫 DNC — worden overgeslagen bij enrich en AI.")
+    else:
+        print("[DNC] ✅ Geen matches gevonden.")
+
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # Stap 2 — Leads enrichen
@@ -236,12 +447,22 @@ def step_lusha_enrich(cfg: dict, sheet) -> None:
     lusha = LushaClient(cfg["lusha_api_key"])
 
     all_rows = get_all_rows(sheet)
-    to_enrich = [
-        row for row in all_rows
-        if row[Col.ENRICHED] not in ("✅ Yes",)
-        and row[Col.CONTACT_ID]
-        and row[Col.REQUEST_ID]
-    ]
+    skip_not_shown = 0
+    to_enrich = []
+    for row in all_rows:
+        if row[Col.ENRICHED] in ("✅ Yes",):
+            continue
+        if row[Col.MAIL_STATUS] in (MailStatus.DNC, MailStatus.SUPPRESSED):
+            continue
+        if not row[Col.CONTACT_ID] or not row[Col.REQUEST_ID]:
+            continue
+        if row[Col.IS_SHOWN].strip().lower() != "yes":
+            skip_not_shown += 1
+            continue
+        to_enrich.append(row)
+
+    if skip_not_shown:
+        print(f"[ENRICH] ⏭ {skip_not_shown} lead(s) overgeslagen — isShown=No (geen credits beschikbaar bij Lusha).")
 
     if not to_enrich:
         print("[ENRICH] Geen rijen gevonden die verrijkt moeten worden.")
@@ -394,11 +615,12 @@ def step_send_mail(cfg: dict, sheet) -> None:
         return
 
     # Veiligheidslagen laden
+    # DNC is al gecheckt na search — dit is een tweede controle voor het geval
+    # de DNC lijst is bijgewerkt na de laatste search.
     dnc_set             = load_do_not_contact(cfg["dnc_path"])
     suppressed          = load_suppression(cfg["suppression_path"])
     contacted_companies = load_contacted_companies(cfg["send_log_path"])
 
-    # Filter leads
     sendable = []
     skip_dnc = skip_sup = skip_company = 0
 
@@ -424,7 +646,8 @@ def step_send_mail(cfg: dict, sheet) -> None:
         sendable.append(row)
 
     print(f"\n[MAIL] {len(rows)} leads gevonden:")
-    print(f"       🚫 DNC:               {skip_dnc}")
+    if skip_dnc:
+        print(f"       🚫 DNC (nieuw):       {skip_dnc}  ← DNC lijst bijgewerkt na search")
     print(f"       ⏭  Al gemaild:        {skip_sup}")
     print(f"       ⏭  Bedrijf al gehad:  {skip_company}")
     print(f"       ✉  Klaar voor verzend: {len(sendable)}")
@@ -462,10 +685,13 @@ def step_send_mail(cfg: dict, sheet) -> None:
         print("[MAIL] Geannuleerd.")
         return
 
-    # Gmail service (alleen als niet dry run)
-    service = None
+    # SMTP verbinding testen vóór batch (alleen bij echte verzending)
     if not dry_run:
-        service = get_gmail_service(cfg["credentials_json"], cfg["token_json"])
+        print("[MAIL] SMTP verbinding testen...")
+        if not verify_connection(cfg["sender_email"], cfg["gmail_app_password"]):
+            print("[MAIL] ❌ SMTP verbinding mislukt. Controleer SENDER_EMAIL en GMAIL_APP_PASSWORD.")
+            return
+        print("[MAIL] ✅ SMTP verbinding OK.")
 
     sent = errors = 0
 
@@ -493,14 +719,14 @@ def step_send_mail(cfg: dict, sheet) -> None:
             sent += 1
         else:
             try:
-                msg = create_message(
+                message_id = send_email(
+                    sender_email=cfg["sender_email"],
                     sender_name=cfg["sender_name"],
+                    app_password=cfg["gmail_app_password"],
                     to_addr=email,
                     subject=subject,
                     body_text=body,
                 )
-                message_id = send_with_retry(service, "me", msg)
-
                 append_suppression(cfg["suppression_path"], email)
                 set_mail_status(sheet, row["row_number"], MailStatus.SENT, message_id=message_id)
                 append_send_log(cfg["send_log_path"], {
@@ -576,20 +802,18 @@ def step_overview(cfg: dict, sheet) -> None:
     print(f"    MAX_EMAILS: {cfg['max_emails']}")
 
 
+
 # ══════════════════════════════════════════════════════════════════════════
 # Main menu
 # ══════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
-    _separator("═")
-    print("  YAG Acquisitie Tool")
-    _separator("═")
-
-    # Config laden
+    # Config laden (consultant .env al geladen door _load_consultant_env())
     cfg = _load_config()
-    print(f"\n  Consultant: {cfg['sender_name']}  ({cfg['sender_email']})")
-    print(f"  DRY_RUN:    {cfg['dry_run']}")
-    print(f"  Sheet:      {cfg['spreadsheet_id'][:20]}...\n")
+
+    # Toon actieve sessie info
+    dry_label = "🟡 DRY RUN" if cfg["dry_run"] else "🟢 LIVE"
+    print(f"  {dry_label}  |  Max: {cfg['max_emails']} mails  |  Sheet: ...{cfg['spreadsheet_id'][-12:]}\n")
 
     # Sheets connectie
     print("[INIT] Verbinden met Google Sheets...")

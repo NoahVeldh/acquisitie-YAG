@@ -162,6 +162,10 @@ def get_rows_for_ai(sheet: gspread.Worksheet) -> list[dict]:
         if not row[Col.EMAIL] or "@" not in row[Col.EMAIL]:
             continue
 
+        # DNC en suppressie overslaan — al vroeg gemarkeerd na search
+        if row[Col.MAIL_STATUS] in (MailStatus.DNC, MailStatus.SUPPRESSED):
+            continue
+
         ai_status = row[Col.AI_STATUS]
         if ai_status in (AIStatus.DONE, AIStatus.RUNNING):
             continue
