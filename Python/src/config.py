@@ -98,8 +98,11 @@ class Enriched:
     NO  = "No"
 
 
+# ── Module-level aliassen (zodat sheets.py direct kan importeren) ─────────
+TOTAL_COLS = Col.TOTAL_COLS
+
 # ── Verplichte consultant-velden (vóór AI generatie te vullen) ────────────
-REQUIRED_META_COLS = [Col.CONSULTANT, Col.VESTIGING, Col.TYPE, Col.HOE_CONTACT]
+REQUIRED_META_COLS  = [Col.CONSULTANT, Col.VESTIGING, Col.TYPE, Col.HOE_CONTACT]
 REQUIRED_META_NAMES = ["Consultant", "Vestiging", "Type", "Hoe contact"]
 
 # ── Data rij start (rij 1 = header) ──────────────────────────────────────
