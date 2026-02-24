@@ -30,11 +30,14 @@ Sheet kolom layout:
   W=23  Contact ID
   X=24  isShown
   Y=25  AI Bericht
+  Z=26  AI Tokens
 """
 
 from __future__ import annotations
 
+
 # ── Sheet kolom nummers (1-indexed, zoals gspread verwacht) ───────────────
+
 class Col:
     COMPANY           = 1
     FIRST_NAME        = 2
@@ -61,12 +64,13 @@ class Col:
     CONTACT_ID        = 23
     IS_SHOWN          = 24
     AI_BERICHT        = 25
+    AI_TOKENS         = 26
+    TOTAL_COLS        = 26
 
-    TOTAL_COLS        = 25
 
-# ── Kolomletter helpers (voor foutmeldingen / logging) ────────────────────
+# ── Kolomletter helpers ───────────────────────────────────────────────────
+
 def col_letter(n: int) -> str:
-    """Zet 1-indexed kolomnummer om naar letter (1→A, 26→Z, 27→AA)."""
     result = ""
     while n > 0:
         n, remainder = divmod(n - 1, 26)
@@ -74,23 +78,25 @@ def col_letter(n: int) -> str:
     return result
 
 
-# ── Status waarden ─────────────────────────────────────────────────────────
+# ── Status waarden ────────────────────────────────────────────────────────
+
 class AIStatus:
     PENDING  = "PENDING"
     RUNNING  = "RUNNING"
     DONE     = "✅ DONE"
     ERROR    = "❌ ERROR"
-    SKIPPED  = "⏭ SKIPPED"          # geen website / te weinig info
+    SKIPPED  = "⏭ SKIPPED"
+    DRY_RUN  = "🔴 DRY RUN"   # preview, nog geen echte API call
 
 
 class MailStatus:
-    PENDING  = "PENDING"
-    DRY_RUN  = "DRY RUN"
-    SENT     = "✅ SENT"
-    ERROR    = "❌ ERROR"
-    DNC      = "🚫 DNC"              # Do Not Contact
+    PENDING    = "PENDING"
+    DRY_RUN    = "🔴 DRY RUN"  # testrun, wordt opnieuw aangeboden bij volgende verzending
+    SENT       = "✅ SENT"
+    ERROR      = "❌ ERROR"
+    DNC        = "🚫 DNC"
     SUPPRESSED = "⏭ AL GEMAILD"
-    NO_EMAIL = "⚠ GEEN EMAIL"
+    NO_EMAIL   = "⚠ GEEN EMAIL"
 
 
 class Enriched:
@@ -98,12 +104,17 @@ class Enriched:
     NO  = "No"
 
 
-# ── Module-level aliassen (zodat sheets.py direct kan importeren) ─────────
+# ── Module-level aliassen ─────────────────────────────────────────────────
+
 TOTAL_COLS = Col.TOTAL_COLS
 
-# ── Verplichte consultant-velden (vóór AI generatie te vullen) ────────────
+
+# ── Verplichte consultant-velden ──────────────────────────────────────────
+
 REQUIRED_META_COLS  = [Col.CONSULTANT, Col.VESTIGING, Col.TYPE, Col.HOE_CONTACT]
 REQUIRED_META_NAMES = ["Consultant", "Vestiging", "Type", "Hoe contact"]
 
-# ── Data rij start (rij 1 = header) ──────────────────────────────────────
+
+# ── Data rij start ────────────────────────────────────────────────────────
+
 DATA_START_ROW = 2

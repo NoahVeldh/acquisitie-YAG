@@ -7,7 +7,6 @@ Gebruik:
 Vereisten:
     - consultants/<naam>.env per consultant (zie .env.example)
     - credentials/service_account.json (voor Google Sheets)
-    - credentials/<naam>_credentials.json (voor Gmail OAuth, per consultant)
     - data/Niet Benaderen.xlsx (DNC lijst)
 
 Flow:
@@ -36,15 +35,7 @@ CONSULTANTS_DIR = Path("consultants")
 
 
 def _load_consultant_env() -> str:
-    """
-    Zoek alle .env bestanden in de consultants/ map, laat de gebruiker
-    kiezen en laad het juiste bestand. Geeft de naam van de consultant terug.
-
-    Bestandsnaamconventie: consultants/<voornaam>.env
-    Voorbeeld:             consultants/rick.env
-    """
     CONSULTANTS_DIR.mkdir(exist_ok=True)
-
     env_files = sorted(CONSULTANTS_DIR.glob("*.env"))
 
     print("═" * 50)
@@ -58,7 +49,6 @@ def _load_consultant_env() -> str:
         print(f"  En vul het in met jouw gegevens.\n")
         sys.exit(1)
 
-    # Lees SENDER_NAME uit elk .env bestand voor een nette weergave
     profiles: list[tuple[Path, str]] = []
     for env_file in env_files:
         values = dotenv_values(env_file)
@@ -78,7 +68,6 @@ def _load_consultant_env() -> str:
 
         if raw == "n":
             _create_new_profile()
-            # Herstart zodat het nieuwe profiel in de lijst verschijnt
             print("\n  Profiel aangemaakt. Herstart het script.\n")
             sys.exit(0)
 
@@ -92,7 +81,6 @@ def _load_consultant_env() -> str:
 
 
 def _create_new_profile() -> None:
-    """Interactief een nieuw consultant profiel aanmaken."""
     print("\n  ── Nieuw profiel aanmaken ──────────────────────")
 
     voornaam     = input("  Voornaam (voor bestandsnaam, geen spaties): ").strip().lower()
@@ -107,26 +95,22 @@ def _create_new_profile() -> None:
         print("  ❌ Voornaam en e-mailadres zijn verplicht.")
         return
 
-    # Lees het .env.example als basis
     example_path = Path(".env.example")
     if example_path.exists():
         template = example_path.read_text(encoding="utf-8")
 
-    # Vervang de placeholders
     filled = (
         template
-        .replace("Rick op het Veld",                   sender_name)
+        .replace("Rick op het Veld",                    sender_name)
         .replace("rick.ophetveld@youngadvisorygroup.nl", sender_email)
-        .replace("+31 6 42 48 16 27",                  sender_phone)
-        .replace("Technische Bedrijfskunde",            studie)
-        .replace("TU Eindhoven",                        universiteit)
+        .replace("+31 6 42 48 16 27",                   sender_phone)
+        .replace("Technische Bedrijfskunde",             studie)
+        .replace("TU Eindhoven",                         universiteit)
     )
 
-    # Voeg vestiging toe als extra variabele
     if vestiging and "VESTIGING_DEFAULT" not in filled:
         filled += f"\nVESTIGING_DEFAULT={vestiging}\n"
 
-    # Zet token pad uniek per consultant
     token_path = f"credentials/token_{voornaam}.json"
     filled = filled.replace(
         "TOKEN_JSON=credentials/token.json",
@@ -139,8 +123,6 @@ def _create_new_profile() -> None:
     print(f"  ℹ  Token pad: {token_path}  (wordt aangemaakt bij eerste Gmail login)")
 
 
-
-
 # ── Laad consultant profiel VOOR alle andere imports ──────────────────────
 _active_consultant = _load_consultant_env()
 
@@ -149,16 +131,14 @@ from src.sheets import (
     get_sheets_client, open_sheet, ensure_header,
     get_all_rows, get_rows_for_ai, get_rows_for_mail,
     append_lusha_contacts, update_enriched_contact,
-    set_ai_status, set_ai_result, set_ai_error,
+    set_ai_status, set_ai_result, set_ai_tokens, set_ai_error,
     set_mail_status, get_existing_contact_ids,
+    cleanup_sheet,
+    append_send_log_sheet, load_suppressed_emails, load_contacted_companies,
 )
 from src.lusha import LushaClient, ICP_PRESETS
 from src.ai_gen import AIGenerator
-from src.storage import (
-    load_do_not_contact, is_do_not_contact,
-    load_suppression, append_suppression,
-    append_send_log, load_contacted_companies,
-)
+from src.storage import load_do_not_contact, is_do_not_contact
 from src.gmail_send import send_email, verify_connection
 
 
@@ -193,6 +173,27 @@ def _header(title: str) -> None:
     _separator()
     print(f"  {title}")
 
+
+# ── Lusha paginateller ────────────────────────────────────────────────────
+
+_PAGE_STATE_PATH = Path("output/lusha_page_state.json")
+
+
+def _load_page_state() -> dict:
+    _PAGE_STATE_PATH.parent.mkdir(exist_ok=True)
+    if _PAGE_STATE_PATH.exists():
+        try:
+            import json
+            return json.loads(_PAGE_STATE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _save_page_state(state: dict) -> None:
+    import json
+    _PAGE_STATE_PATH.parent.mkdir(exist_ok=True)
+    _PAGE_STATE_PATH.write_text(json.dumps(state, indent=2), encoding="utf-8")
     _separator()
 
 
@@ -201,7 +202,6 @@ def _confirm(prompt: str = "Doorgaan? (j/n): ") -> bool:
 
 
 def _pick(options: list[str], prompt: str = "Kies een optie: ") -> int:
-    """Laat gebruiker een optie kiezen. Returnt 0-indexed keuze."""
     for i, opt in enumerate(options, 1):
         print(f"  [{i}] {opt}")
     while True:
@@ -216,39 +216,28 @@ def _pick(options: list[str], prompt: str = "Kies een optie: ") -> int:
 # ══════════════════════════════════════════════════════════════════════════
 
 def _load_config() -> dict:
-    """Laad en valideer alle configuratie uit .env."""
     config = {
-        # Sheets
-        "spreadsheet_id":     _env("SPREADSHEET_ID"),
-        "worksheet_name":     _env("WORKSHEET_NAME", "Sheet1"),
-        "service_account":    _env("SERVICE_ACCOUNT_JSON", "credentials/service_account.json"),
-        # Gmail SMTP (App Password — geen OAuth nodig)
-        "gmail_app_password": _env("GMAIL_APP_PASSWORD"),
-        # Lusha
-        "lusha_api_key":      _env("LUSHA_API_KEY"),
-        # OpenAI
-        "openai_api_key":     _env("OPENAI_API_KEY"),
-        # Consultant
-        "sender_name":        _env("SENDER_NAME"),
-        "sender_email":       _env("SENDER_EMAIL"),
-        "sender_phone":       _env("SENDER_PHONE"),
-        "studie":             _env("STUDIE", "Technische Bedrijfskunde"),
-        "universiteit":       _env("UNIVERSITEIT", "TU Eindhoven"),
-        "subject_template":   _env("SUBJECT_TEMPLATE", "Young Advisory Group x {company}"),
-        # Run
-        "dry_run":            _env_bool("DRY_RUN", True),
-        "max_emails":         _env_int("MAX_EMAILS", 20),
-        "rate_limit_sec":     float(_env("RATE_LIMIT_SEC", "2")),
-        # Paden
-        "suppression_path":   _env("SUPPRESSION_PATH", "output/suppression.csv"),
-        "send_log_path":      _env("SEND_LOG_PATH", "output/send_log.csv"),
-        "dnc_path":           _env("DNC_PATH", "data/Niet Benaderen.xlsx"),
-        # Meta-veld defaults (vooringevuld bij Lusha stap)
+        "spreadsheet_id":      _env("SPREADSHEET_ID"),
+        "worksheet_name":      _env("WORKSHEET_NAME", "Sheet1"),
+        "service_account":     _env("SERVICE_ACCOUNT_JSON", "credentials/service_account.json"),
+        "gmail_app_password":  _env("GMAIL_APP_PASSWORD"),
+        "lusha_api_key":       _env("LUSHA_API_KEY"),
+        "openai_api_key":      _env("OPENAI_API_KEY"),
+        "sender_name":         _env("SENDER_NAME"),
+        "sender_email":        _env("SENDER_EMAIL"),
+        "sender_phone":        _env("SENDER_PHONE"),
+        "studie":              _env("STUDIE", "Technische Bedrijfskunde"),
+        "universiteit":        _env("UNIVERSITEIT", "TU Eindhoven"),
+        "subject_template":    _env("SUBJECT_TEMPLATE", "Young Advisory Group x {company}"),
+        "use_web_search":      _env_bool("USE_WEB_SEARCH", True),
+        "dry_run":             _env_bool("DRY_RUN", True),
+        "max_emails":          _env_int("MAX_EMAILS", 20),
+        "rate_limit_sec":      float(_env("RATE_LIMIT_SEC", "2")),
+        "dnc_path":            _env("DNC_PATH", "data/Niet Benaderen.xlsx"),
         "vestiging_default":   _env("VESTIGING_DEFAULT", "Eindhoven-Tilburg"),
         "type_default":        _env("TYPE_DEFAULT", "Cold"),
         "gevallen_default":    _env("GEVALLEN_DEFAULT", ""),
         "hoe_contact_default": _env("HOE_CONTACT_DEFAULT", "Lusha"),
-        # Lusha industrie default (lijst van IDs, leeg = alle industrieën)
         "industry_ids_default": [
             int(x.strip()) for x in _env("INDUSTRY_IDS_DEFAULT", "").split(",")
             if x.strip().isdigit()
@@ -284,16 +273,16 @@ def step_lusha_search(cfg: dict, sheet) -> None:
 
     lusha = LushaClient(cfg["lusha_api_key"])
 
-    # ── ICP kiezen ────────────────────────────────────────────────────────
     print("\nWelk ICP profiel wil je gebruiken?")
     preset_keys = list(ICP_PRESETS.keys()) + ["Eigen filters"]
     choice = _pick(preset_keys)
 
     if choice < len(ICP_PRESETS):
         preset_name = preset_keys[choice]
-        filters = dict(ICP_PRESETS[preset_name])   # kopie zodat we kunnen aanpassen
+        filters = dict(ICP_PRESETS[preset_name])
         print(f"\n  Preset: {preset_name}")
     else:
+        preset_name = "eigen"
         print("\n  (Voer je eigen filters in)")
         filters = {
             "countries":     [input("  Land (bijv. Netherlands): ").strip() or "Netherlands"],
@@ -303,26 +292,20 @@ def step_lusha_search(cfg: dict, sheet) -> None:
             "job_titles":    [t.strip() for t in input("  Functietitels (kommagescheiden): ").split(",")],
         }
 
-    # ── Industrie kiezen / bevestigen ─────────────────────────────────────
     default_industry_ids = cfg.get("industry_ids_default", [])
     current_ids = filters.get("industry_ids") or default_industry_ids
 
-    # Haal industrie-namen op voor weergave
     def _ids_to_label(ids, industry_list):
         if not ids:
             return "Alle industrieën"
-        names = []
-        for ind in industry_list:
-            if ind["main_industry_id"] in ids:
-                names.append(ind["main_industry"])
+        names = [ind["main_industry"] for ind in industry_list if ind["main_industry_id"] in ids]
         return ", ".join(names) if names else str(ids)
 
     print(f"\n  Industrie: ", end="")
     industry_list = []
     try:
         industry_list = lusha.get_industries()
-        current_label = _ids_to_label(current_ids, industry_list)
-        print(current_label)
+        print(_ids_to_label(current_ids, industry_list))
     except Exception:
         print(str(current_ids) if current_ids else "Alle (kon niet ophalen)")
 
@@ -343,32 +326,37 @@ def step_lusha_search(cfg: dict, sheet) -> None:
 
     filters["industry_ids"] = current_ids
 
-    # ── Pagina's — willekeurige startpagina om duplicaten te voorkomen ──────
-    import random
-    random_page = random.randint(1, 50)
+    preset_key = preset_name if choice < len(ICP_PRESETS) else "eigen"
+    page_state = _load_page_state()
+    start_page = page_state.get(preset_key, 1)
 
-    num_pages = 1
-    print(f"\n  Startpagina: {random_page} (willekeurig)")
-    override = input(f"  Andere startpagina? (Enter = {random_page}, of typ getal): ").strip()
-    start_page = int(override) if override.isdigit() else random_page
+    override = input(f"\n  📄 Lusha pagina: {start_page}  (Enter = overnemen, of typ ander getal): ").strip()
+    if override.isdigit():
+        start_page = int(override)
 
-    # ── Meta-velden ───────────────────────────────────────────────────────
-    default_vestiging   = cfg.get("vestiging_default", "Eindhoven-Tilburg")
-    default_type        = cfg.get("type_default", "Koud contact")
-    default_gevallen    = cfg.get("gevallen_default", "")
-    default_hoe_contact = cfg.get("hoe_contact_default", "Lusha")
+    saved_meta  = page_state.get("_meta", {})
+    consultant  = saved_meta.get("consultant",  cfg["sender_name"])
+    vestiging   = saved_meta.get("vestiging",   cfg.get("vestiging_default", "Eindhoven-Tilburg"))
+    type_       = saved_meta.get("type_",       cfg.get("type_default", "Koud contact"))
+    gevallen    = saved_meta.get("gevallen",    cfg.get("gevallen_default", ""))
+    hoe_contact = saved_meta.get("hoe_contact", cfg.get("hoe_contact_default", "Lusha"))
 
-    print(f"\nMeta-velden (Enter = standaardwaarde overnemen):")
-    consultant  = input(f"  Consultant      [{cfg['sender_name']}]: ").strip() or cfg["sender_name"]
-    vestiging   = input(f"  Vestiging       [{default_vestiging}]: ").strip() or default_vestiging
-    type_       = input(f"  Type            [{default_type}]: ").strip() or default_type
-    gevallen    = input(f"  Gevallen/sector [{default_gevallen or 'leeg'}]: ").strip() or default_gevallen
-    hoe_contact = input(f"  Hoe contact     [{default_hoe_contact}]: ").strip() or default_hoe_contact
+    print(f"\n  Meta-velden: {consultant} | {vestiging} | {type_} | {hoe_contact}")
+    if _confirm("  Wijzigen? (j/n): "):
+        consultant  = input(f"  Consultant      [{consultant}]: ").strip() or consultant
+        vestiging   = input(f"  Vestiging       [{vestiging}]: ").strip() or vestiging
+        type_       = input(f"  Type            [{type_}]: ").strip() or type_
+        gevallen    = input(f"  Gevallen/sector [{gevallen or 'leeg'}]: ").strip() or gevallen
+        hoe_contact = input(f"  Hoe contact     [{hoe_contact}]: ").strip() or hoe_contact
 
-    # ── Ophalen ───────────────────────────────────────────────────────────
-    print(f"\n[LUSHA] Ophalen: {num_pages} pagina(\'s) vanaf pagina {start_page}...")
+    page_state["_meta"] = {
+        "consultant": consultant, "vestiging": vestiging,
+        "type_": type_, "gevallen": gevallen, "hoe_contact": hoe_contact,
+    }
+
+    print(f"\n[LUSHA] Ophalen: 1 pagina vanaf pagina {start_page}...")
     contacts, request_id = lusha.search_multiple_pages(
-        num_pages=num_pages,
+        num_pages=1,
         start_page=start_page,
         **filters,
     )
@@ -377,7 +365,6 @@ def step_lusha_search(cfg: dict, sheet) -> None:
         print("[LUSHA] Geen contacten gevonden.")
         return
 
-    # Duplicate check
     existing_ids = get_existing_contact_ids(sheet)
     new_contacts = [c for c in contacts if str(c.get("contactId", "")) not in existing_ids]
     skipped = len(contacts) - len(new_contacts)
@@ -388,7 +375,7 @@ def step_lusha_search(cfg: dict, sheet) -> None:
         print("[LUSHA] Niets toe te voegen.")
         return
 
-    if not _confirm(f"Voeg {len(new_contacts)} leads toe aan de sheet? (j/n): "):
+    if input(f"Voeg {len(new_contacts)} leads toe aan de sheet? (Enter = ja, n = nee): ").strip().lower() in ("n", "nee", "no"):
         print("[LUSHA] Geannuleerd.")
         return
 
@@ -404,7 +391,9 @@ def step_lusha_search(cfg: dict, sheet) -> None:
     )
     print(f"[LUSHA] ✅ {added} leads toegevoegd aan de sheet.")
 
-    # ── DNC scan direct na toevoegen ──────────────────────────────────────
+    page_state[preset_key] = start_page + 1
+    _save_page_state(page_state)
+
     print("\n[DNC] DNC-lijst controleren op nieuwe leads...")
     try:
         dnc_set = load_do_not_contact(cfg["dnc_path"])
@@ -420,7 +409,6 @@ def step_lusha_search(cfg: dict, sheet) -> None:
         company     = row[Col.COMPANY]
         mail_status = row[Col.MAIL_STATUS]
 
-        # Alleen rijen die net zijn toegevoegd (PENDING) en nog geen status hebben
         if mail_status not in ("", "PENDING"):
             continue
 
@@ -431,10 +419,9 @@ def step_lusha_search(cfg: dict, sheet) -> None:
             dnc_marked += 1
 
     if dnc_marked:
-        print(f"[DNC] {dnc_marked} lead(s) gemarkeerd als 🚫 DNC — worden overgeslagen bij enrich en AI.")
+        print(f"[DNC] {dnc_marked} lead(s) gemarkeerd als 🚫 DNC.")
     else:
         print("[DNC] ✅ Geen matches gevonden.")
-
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -447,22 +434,13 @@ def step_lusha_enrich(cfg: dict, sheet) -> None:
     lusha = LushaClient(cfg["lusha_api_key"])
 
     all_rows = get_all_rows(sheet)
-    skip_not_shown = 0
-    to_enrich = []
-    for row in all_rows:
-        if row[Col.ENRICHED] in ("✅ Yes",):
-            continue
-        if row[Col.MAIL_STATUS] in (MailStatus.DNC, MailStatus.SUPPRESSED):
-            continue
-        if not row[Col.CONTACT_ID] or not row[Col.REQUEST_ID]:
-            continue
-        if row[Col.IS_SHOWN].strip().lower() != "yes":
-            skip_not_shown += 1
-            continue
-        to_enrich.append(row)
-
-    if skip_not_shown:
-        print(f"[ENRICH] ⏭ {skip_not_shown} lead(s) overgeslagen — isShown=No (geen credits beschikbaar bij Lusha).")
+    to_enrich = [
+        row for row in all_rows
+        if row[Col.ENRICHED] not in ("✅ Yes",)
+        and row[Col.MAIL_STATUS] not in (MailStatus.DNC, MailStatus.SUPPRESSED)
+        and row[Col.CONTACT_ID]
+        and row[Col.REQUEST_ID]
+    ]
 
     if not to_enrich:
         print("[ENRICH] Geen rijen gevonden die verrijkt moeten worden.")
@@ -470,7 +448,6 @@ def step_lusha_enrich(cfg: dict, sheet) -> None:
 
     print(f"[ENRICH] {len(to_enrich)} leads te enrichen.")
 
-    # Groepeer op request_id (Lusha vereist dit)
     by_request: dict[str, list] = {}
     for row in to_enrich:
         rid = row[Col.REQUEST_ID]
@@ -490,11 +467,10 @@ def step_lusha_enrich(cfg: dict, sheet) -> None:
             total_errors += len(contact_ids)
             continue
 
-        # Map op contact_id
         enriched_map = {e["contact_id"]: e for e in enriched}
 
         for row in rows:
-            cid = row[Col.CONTACT_ID]
+            cid  = row[Col.CONTACT_ID]
             data = enriched_map.get(cid)
 
             if not data:
@@ -530,11 +506,16 @@ def step_ai_generate(cfg: dict, sheet) -> None:
               "(Consultant, Vestiging, Type, Hoe contact).")
         return
 
-    print(f"[AI] {len(rows)} leads klaar voor AI generatie.\n")
+    dry_run_rows = [r for r in rows if r[Col.AI_STATUS] == AIStatus.DRY_RUN]
 
-    # Overzicht tonen
+    print(f"[AI] {len(rows)} leads klaar voor AI generatie.")
+    if dry_run_rows:
+        print(f"     waarvan {len(dry_run_rows)} 🔴 DRY RUN (preview) die opnieuw aangeboden worden")
+    print()
+
     for i, row in enumerate(rows[:10], 1):
-        print(f"  {i:>3}. {row[Col.COMPANY]:<30} {row[Col.FIRST_NAME]} {row[Col.LAST_NAME]}")
+        status_tag = " 🔴" if row[Col.AI_STATUS] == AIStatus.DRY_RUN else ""
+        print(f"  {i:>3}. {row[Col.COMPANY]:<30} {row[Col.FIRST_NAME]} {row[Col.LAST_NAME]}{status_tag}")
     if len(rows) > 10:
         print(f"       ... en {len(rows) - 10} meer")
 
@@ -542,8 +523,9 @@ def step_ai_generate(cfg: dict, sheet) -> None:
     limit = int(max_gen) if max_gen.isdigit() else len(rows)
     rows = rows[:limit]
 
-    dry_run_ai = _confirm("Dry-run (geen echte OpenAI API calls)? (j/n): ")
+    dry_run_ai = _confirm("Dry-run (geen echte OpenAI API calls, status wordt 🔴 DRY RUN)? (j/n): ")
 
+    ai = None
     if not dry_run_ai:
         ai = AIGenerator(
             api_key=cfg["openai_api_key"],
@@ -557,47 +539,54 @@ def step_ai_generate(cfg: dict, sheet) -> None:
     print()
     done = 0
     errors = 0
+    total_tokens = 0
 
     for row in rows:
         name    = f"{row[Col.FIRST_NAME]} {row[Col.LAST_NAME]}".strip()
         company = row[Col.COMPANY]
         label   = f"{company} | {name}"
 
-        # Markeer als RUNNING
         set_ai_status(sheet, row["row_number"], AIStatus.RUNNING)
 
         try:
             if dry_run_ai:
-                bericht = ai.preview(
-                    first_name=row[Col.FIRST_NAME],
-                    company_name=company,
-                    vestiging=row[Col.VESTIGING],
-                ) if not dry_run_ai else (
+                bericht = (
                     f"[DRY RUN PREVIEW]\n\nBeste {row[Col.FIRST_NAME]},\n\n"
                     f"[AI CONNECTIEZINNEN VOOR {company}]\n\n"
                     "... rest van de mail ..."
                 )
+                tokens = 0
             else:
-                bericht = ai.generate(
+                bericht, tokens = ai.generate(
                     first_name=row[Col.FIRST_NAME],
                     job_title=row[Col.JOB_TITLE],
                     company_name=company,
-                    website="",   # website niet meer in sheet, eventueel toe te voegen
+                    website="",
                     vestiging=row[Col.VESTIGING],
                 )
 
-            set_ai_result(sheet, row["row_number"], bericht)
+            set_ai_result(sheet, row["row_number"], bericht, dry_run=dry_run_ai)
+            set_ai_tokens(sheet, row["row_number"], tokens)
+
+            total_tokens += tokens
             done += 1
-            print(f"  ✅ {label}")
+
+            status_label = "🔴 DRY RUN" if dry_run_ai else "✅"
+            token_info   = f"  ({tokens} tokens)" if tokens > 0 else ""
+            print(f"  {status_label} {label}{token_info}")
 
         except Exception as e:
             set_ai_error(sheet, row["row_number"], str(e))
             errors += 1
             print(f"  ❌ {label} — {e}")
 
-        time.sleep(0.3)  # kleine pauze om sheet API niet te overbelasten
+        time.sleep(0.3)
 
     print(f"\n[AI] Klaar. ✅ {done} gegenereerd, ❌ {errors} fouten.")
+    if dry_run_ai:
+        print(f"[AI] Status in sheet: 🔴 DRY RUN — kies optie 3 opnieuw zonder dry-run om echt te genereren.")
+    if total_tokens > 0:
+        print(f"[AI] Totaal verbruikt: {total_tokens} tokens deze sessie.")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -612,14 +601,12 @@ def step_send_mail(cfg: dict, sheet) -> None:
     if not rows:
         print("[MAIL] Geen leads gevonden klaar voor verzending.")
         print("       Zorg dat AI Status = ✅ DONE en Mail Status leeg/PENDING is.")
+        print("       Rijen met 🔴 DRY RUN worden niet verstuurd — genereer ze eerst echt via stap 3.")
         return
 
-    # Veiligheidslagen laden
-    # DNC is al gecheckt na search — dit is een tweede controle voor het geval
-    # de DNC lijst is bijgewerkt na de laatste search.
     dnc_set             = load_do_not_contact(cfg["dnc_path"])
-    suppressed          = load_suppression(cfg["suppression_path"])
-    contacted_companies = load_contacted_companies(cfg["send_log_path"])
+    suppressed          = load_suppressed_emails(sheet)
+    contacted_companies = load_contacted_companies(sheet)
 
     sendable = []
     skip_dnc = skip_sup = skip_company = 0
@@ -647,7 +634,7 @@ def step_send_mail(cfg: dict, sheet) -> None:
 
     print(f"\n[MAIL] {len(rows)} leads gevonden:")
     if skip_dnc:
-        print(f"       🚫 DNC (nieuw):       {skip_dnc}  ← DNC lijst bijgewerkt na search")
+        print(f"       🚫 DNC (nieuw):       {skip_dnc}")
     print(f"       ⏭  Al gemaild:        {skip_sup}")
     print(f"       ⏭  Bedrijf al gehad:  {skip_company}")
     print(f"       ✉  Klaar voor verzend: {len(sendable)}")
@@ -656,7 +643,6 @@ def step_send_mail(cfg: dict, sheet) -> None:
         print("\n[MAIL] Niets te versturen.")
         return
 
-    # Dry run instelling
     dry_run = cfg["dry_run"]
     print(f"\n  DRY_RUN = {dry_run}  (wijzig in .env of toggle hieronder)")
     if _confirm("Wil je DRY_RUN omzetten? (j/n): "):
@@ -668,15 +654,13 @@ def step_send_mail(cfg: dict, sheet) -> None:
     max_send = int(max_input) if max_input.isdigit() else max_send
     sendable = sendable[:max_send]
 
-    # Toon preview van eerste mail
     print(f"\n── Preview eerste mail ──────────────────────────────")
     first = sendable[0]
     print(f"  Aan:       {first[Col.EMAIL]}")
     print(f"  Bedrijf:   {first[Col.COMPANY]}")
     print(f"  Onderwerp: {AIGenerator.subject(first[Col.COMPANY], cfg['subject_template'])}")
     print(f"  Body preview:\n")
-    preview = first[Col.AI_BERICHT][:400]
-    for line in preview.split("\n"):
+    for line in first[Col.AI_BERICHT][:400].split("\n"):
         print(f"    {line}")
     print(f"    ...")
     print(f"─────────────────────────────────────────────────────")
@@ -685,7 +669,6 @@ def step_send_mail(cfg: dict, sheet) -> None:
         print("[MAIL] Geannuleerd.")
         return
 
-    # SMTP verbinding testen vóór batch (alleen bij echte verzending)
     if not dry_run:
         print("[MAIL] SMTP verbinding testen...")
         if not verify_connection(cfg["sender_email"], cfg["gmail_app_password"]):
@@ -715,7 +698,7 @@ def step_send_mail(cfg: dict, sheet) -> None:
         if dry_run:
             print(f"  [DRY RUN] → {email} | {company}")
             set_mail_status(sheet, row["row_number"], MailStatus.DRY_RUN)
-            append_send_log(cfg["send_log_path"], {**log_base, "status": "DRY RUN", "message_id": "", "error": ""})
+            append_send_log_sheet(sheet.spreadsheet, {**log_base, "status": "DRY RUN", "message_id": "", "error": ""})
             sent += 1
         else:
             try:
@@ -727,9 +710,8 @@ def step_send_mail(cfg: dict, sheet) -> None:
                     subject=subject,
                     body_text=body,
                 )
-                append_suppression(cfg["suppression_path"], email)
                 set_mail_status(sheet, row["row_number"], MailStatus.SENT, message_id=message_id)
-                append_send_log(cfg["send_log_path"], {
+                append_send_log_sheet(sheet.spreadsheet, {
                     **log_base, "status": "SENT", "message_id": message_id, "error": ""
                 })
                 print(f"  ✅ SENT → {email} | {company}")
@@ -739,7 +721,7 @@ def step_send_mail(cfg: dict, sheet) -> None:
             except Exception as e:
                 err_str = str(e)
                 set_mail_status(sheet, row["row_number"], MailStatus.ERROR, error=err_str)
-                append_send_log(cfg["send_log_path"], {
+                append_send_log_sheet(sheet.spreadsheet, {
                     **log_base, "status": "ERROR", "message_id": "", "error": err_str
                 })
                 print(f"  ❌ ERROR → {email} | {e}")
@@ -747,7 +729,7 @@ def step_send_mail(cfg: dict, sheet) -> None:
 
     print(f"\n[MAIL] Klaar. ✅ {sent} verstuurd, ❌ {errors} fouten.")
     if errors:
-        print(f"       Zie {cfg['send_log_path']} voor details.")
+        print(f"       Zie het 'Send Log' tabblad in de spreadsheet voor details.")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -763,16 +745,16 @@ def step_overview(cfg: dict, sheet) -> None:
         print("[OVERZICHT] Sheet is leeg.")
         return
 
-    # Tel statussen
     ai_statuses   = {}
     mail_statuses = {}
     enriched      = {"✅ Yes": 0, "No": 0, "overig": 0}
+    total_tokens  = 0
 
     for row in rows:
         if not any(row[c] for c in [Col.COMPANY, Col.EMAIL]):
-            continue  # lege rijen overslaan
+            continue
 
-        ai  = row[Col.AI_STATUS]  or "PENDING"
+        ai  = row[Col.AI_STATUS]   or "PENDING"
         ml  = row[Col.MAIL_STATUS] or "PENDING"
         en  = row[Col.ENRICHED]
 
@@ -781,9 +763,15 @@ def step_overview(cfg: dict, sheet) -> None:
         enriched_key = en if en in enriched else "overig"
         enriched[enriched_key] = enriched.get(enriched_key, 0) + 1
 
+        try:
+            total_tokens += int(row[Col.AI_TOKENS] or 0)
+        except (ValueError, TypeError):
+            pass
+
     total = len([r for r in rows if r[Col.COMPANY]])
 
     print(f"\n  Totaal leads in sheet:  {total}")
+
     print(f"\n  Enrichment:")
     for k, v in enriched.items():
         print(f"    {k:<15} {v}")
@@ -796,11 +784,73 @@ def step_overview(cfg: dict, sheet) -> None:
     for k, v in sorted(mail_statuses.items(), key=lambda x: x[1], reverse=True):
         print(f"    {k:<20} {v}")
 
+    if total_tokens > 0:
+        print(f"\n  AI Tokenverbruik (cumulatief in sheet): {total_tokens:,} tokens")
+
     print(f"\n  Config:")
     print(f"    Consultant: {cfg['sender_name']}")
     print(f"    DRY_RUN:    {cfg['dry_run']}")
     print(f"    MAX_EMAILS: {cfg['max_emails']}")
 
+    # ── Lusha paginateller ────────────────────────────────────────────────
+    page_state = _load_page_state()
+    presets = {k: v for k, v in page_state.items() if k != "_meta"}
+
+    if presets:
+        print(f"\n  Lusha paginateller:")
+        preset_list = list(presets.items())
+        for i, (preset, page) in enumerate(preset_list, 1):
+            print(f"    [{i}] {preset:<25} → pagina {page}")
+        print(f"    [n] Niets wijzigen")
+        print()
+
+        raw = input("  Welk preset wil je aanpassen? ").strip().lower()
+
+        if raw.isdigit() and 1 <= int(raw) <= len(preset_list):
+            preset_name, current_page = preset_list[int(raw) - 1]
+            new_page = input(f"  Nieuwe paginanummer [{current_page}]: ").strip()
+            if new_page.isdigit() and int(new_page) >= 1:
+                page_state[preset_name] = int(new_page)
+                _save_page_state(page_state)
+                print(f"  ✅ {preset_name} → pagina {new_page}")
+            else:
+                print("  Ongeldige invoer, niets gewijzigd.")
+        # 'n' of enter → niets doen
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Stap 6 — Sheet opschonen
+# ══════════════════════════════════════════════════════════════════════════
+
+def step_cleanup(cfg: dict, sheet) -> None:
+    _header("STAP 6 — Sheet opschonen")
+
+    all_rows = get_all_rows(sheet)
+
+    preview_dnc      = sum(1 for r in all_rows if r[Col.MAIL_STATUS] == MailStatus.DNC)
+    preview_no_email = sum(1 for r in all_rows
+                          if r[Col.ENRICHED] == "✅ Yes" and not r[Col.EMAIL])
+
+    print(f"\n  Dit wordt opgeschoond:\n")
+    print(f"    📦 DNC rijen verplaatst naar 'DNC Archief' tabblad:  {preview_dnc}")
+    print(f"    🗑  Geen email gevonden na enrich:                   {preview_no_email}")
+    print(f"    ℹ  🔴 DRY RUN rijen blijven staan (worden opnieuw aangeboden bij stap 4)")
+
+    total = preview_dnc + preview_no_email
+    if total == 0:
+        print("\n  ✅ Sheet is al schoon, niets te doen.")
+        return
+
+    if not _confirm(f"\n  {total} rijen verwerken? (j/n): "):
+        print("  Geannuleerd.")
+        return
+
+    print("\n  Bezig...")
+    result = cleanup_sheet(sheet)
+
+    print(f"\n  ✅ Klaar:")
+    print(f"    📦 {result['moved_dnc']} DNC rijen → 'DNC Archief' tabblad")
+    print(f"    🗑  {result['deleted_no_email']} rijen zonder email verwijderd")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -808,28 +858,25 @@ def step_overview(cfg: dict, sheet) -> None:
 # ══════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
-    # Config laden (consultant .env al geladen door _load_consultant_env())
     cfg = _load_config()
 
-    # Toon actieve sessie info
     dry_label = "🟡 DRY RUN" if cfg["dry_run"] else "🟢 LIVE"
     print(f"  {dry_label}  |  Max: {cfg['max_emails']} mails  |  Sheet: ...{cfg['spreadsheet_id'][-12:]}\n")
 
-    # Sheets connectie
     print("[INIT] Verbinden met Google Sheets...")
     client = get_sheets_client(cfg["service_account"])
     sheet  = open_sheet(client, cfg["spreadsheet_id"], cfg["worksheet_name"])
     ensure_header(sheet)
     print("[INIT] ✅ Verbonden.\n")
 
-    # Menu loop
     MENU = [
-        ("1", "📥  Leads ophalen via Lusha",           lambda: step_lusha_search(cfg, sheet)),
+        ("1", "📥  Leads ophalen via Lusha",            lambda: step_lusha_search(cfg, sheet)),
         ("2", "🔍  Leads enrichen (email/tel/LinkedIn)", lambda: step_lusha_enrich(cfg, sheet)),
-        ("3", "🤖  AI berichten genereren",             lambda: step_ai_generate(cfg, sheet)),
-        ("4", "✉   Mails versturen",                    lambda: step_send_mail(cfg, sheet)),
-        ("5", "📊  Overzicht bekijken",                 lambda: step_overview(cfg, sheet)),
-        ("q", "🚪  Afsluiten",                          None),
+        ("3", "🤖  AI berichten genereren",              lambda: step_ai_generate(cfg, sheet)),
+        ("4", "✉   Mails versturen",                     lambda: step_send_mail(cfg, sheet)),
+        ("5", "📊  Overzicht bekijken",                  lambda: step_overview(cfg, sheet)),
+        ("6", "🧹  Sheet opschonen",                     lambda: step_cleanup(cfg, sheet)),
+        ("q", "🚪  Afsluiten",                           None),
     ]
 
     while True:

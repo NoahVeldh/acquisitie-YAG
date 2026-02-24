@@ -15,6 +15,7 @@ consultants/*.env
 
 # Google credentials (nooit committen!)
 credentials/*.json
+credentials/service_account.json
 
 # Output / logs (bevatten PII)
 output/

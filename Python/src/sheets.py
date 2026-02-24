@@ -1,39 +1,47 @@
 """
 sheets.py — Google Sheets connectie en alle lees/schrijf operaties
 
-Verantwoordelijkheden:
-  - Authenticeren met Google Sheets API via service account
-  - Leads uitlezen (inclusief filtering op status)
-  - Status terugschrijven per rij (AI status, mail status, etc.)
-  - Header aanmaken als sheet leeg is
-  - Nieuwe Lusha-leads appenden
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WIJZIGINGEN T.O.V. VORIGE VERSIE:
+
+  NIEUW — MailStatus.DRY_RUN is nu "🔴 DRY RUN" (was "DRY RUN")
+    - get_rows_for_mail() sluit 🔴 DRY RUN niet meer uit
+      → rijen worden opnieuw aangeboden bij de volgende verzendpoging
+    - load_suppressed_emails() telt 🔴 DRY RUN niet meer als "al verstuurd"
+      → e-mailadres blijft beschikbaar voor echte verzending
+    - cleanup_sheet() verwijdert 🔴 DRY RUN (mail) rijen nog steeds als je
+      dat handmatig aanvraagt via stap 6
+
+EERDERE FIXES/TOEVOEGINGEN:
+  - set_mail_status wist Follow-up (L) en Reactie (M) niet meer
+  - set_ai_error overschrijft Mail Status (J) niet meer
+  - set_ai_result overschrijft meta-velden niet meer
+  - Kolom Z (AI Tokens) toegevoegd
+  - AIStatus.DRY_RUN "🔴 DRY RUN" toegevoegd
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 from __future__ import annotations
 
 import os
 from datetime import datetime
-from typing import Optional
 
 import gspread
 from google.oauth2.service_account import Credentials
 
 from src.config import Col, AIStatus, MailStatus, Enriched, DATA_START_ROW, TOTAL_COLS, REQUIRED_META_COLS, REQUIRED_META_NAMES
 
-# ── Scopes ────────────────────────────────────────────────────────────────
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-]
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
-# ── Header definitie (rij 1) ──────────────────────────────────────────────
 HEADER_ROW = [
     "Company", "First Name", "Last Name", "Job Title", "Email", "Phone",
     "LinkedIn URL", "Enriched ✅", "AI Status", "Mail Status", "Datum Mail",
     "Follow-up datum", "Reactie ontvangen", "Opmerking",
-    "---",                          # O separator
+    "---",
     "Consultant", "Vestiging", "Type", "Gevallen", "Hoe kom je aan dit contact",
-    "---",                          # U separator
+    "---",
     "Request ID", "Contact ID", "isShown", "AI Bericht",
+    "AI Tokens",
 ]
 
 assert len(HEADER_ROW) == Col.TOTAL_COLS, (
@@ -44,27 +52,16 @@ assert len(HEADER_ROW) == Col.TOTAL_COLS, (
 # ── Authenticatie ─────────────────────────────────────────────────────────
 
 def get_sheets_client(service_account_json: str) -> gspread.Client:
-    """
-    Geeft een geauthenticeerde gspread client terug via een service account.
-
-    Hoe maak je een service account aan:
-      1. Google Cloud Console → IAM & Admin → Service Accounts
-      2. Nieuwe service account aanmaken
-      3. JSON key downloaden → sla op als credentials/service_account.json
-      4. Deel je Google Sheet met het service account e-mailadres (Viewer/Editor)
-    """
     if not os.path.exists(service_account_json):
         raise FileNotFoundError(
             f"Service account JSON niet gevonden: {service_account_json}\n"
             "Download hem via Google Cloud Console en zet hem op dit pad."
         )
-
     creds = Credentials.from_service_account_file(service_account_json, scopes=SCOPES)
     return gspread.authorize(creds)
 
 
 def open_sheet(client: gspread.Client, spreadsheet_id: str, worksheet_name: str) -> gspread.Worksheet:
-    """Open een specifiek worksheet op basis van spreadsheet ID en sheetnaam."""
     try:
         spreadsheet = client.open_by_key(spreadsheet_id)
     except gspread.SpreadsheetNotFound:
@@ -72,7 +69,6 @@ def open_sheet(client: gspread.Client, spreadsheet_id: str, worksheet_name: str)
             f"Spreadsheet niet gevonden: {spreadsheet_id}\n"
             "Controleer SPREADSHEET_ID in .env en zorg dat het service account toegang heeft."
         )
-
     try:
         return spreadsheet.worksheet(worksheet_name)
     except gspread.WorksheetNotFound:
@@ -85,19 +81,15 @@ def open_sheet(client: gspread.Client, spreadsheet_id: str, worksheet_name: str)
 # ── Header setup ──────────────────────────────────────────────────────────
 
 def ensure_header(sheet: gspread.Worksheet) -> None:
-    """Schrijf de header naar rij 1 als deze nog niet bestaat of verkeerd is."""
     existing = sheet.row_values(1)
-
     if existing == HEADER_ROW:
-        return  # al correct
-
+        return
     if existing and existing[0] != "Company":
         print(f"[SHEETS] ⚠ Rij 1 heeft onverwachte waarden: {existing[:5]}...")
         confirm = input("Wil je de header overschrijven? (j/n): ").strip().lower()
         if confirm != "j":
             print("[SHEETS] Header niet aangepast.")
             return
-
     sheet.update(range_name="A1", values=[HEADER_ROW])
     print("[SHEETS] ✅ Header geschreven.")
 
@@ -105,21 +97,15 @@ def ensure_header(sheet: gspread.Worksheet) -> None:
 # ── Leads lezen ───────────────────────────────────────────────────────────
 
 def get_all_rows(sheet: gspread.Worksheet) -> list[dict]:
-    """
-    Lees alle data-rijen uit de sheet (exclusief header).
-    Elke rij wordt een dict met kolomnummer → waarde.
-    Voegt ook 'row_number' toe voor terugschrijven.
-    """
     all_values = sheet.get_all_values()
     if len(all_values) < DATA_START_ROW:
         return []
 
     rows = []
     for i, row in enumerate(all_values[DATA_START_ROW - 1:], start=DATA_START_ROW):
-        # Pad kortere rijen aan met lege strings
         padded = row + [""] * (Col.TOTAL_COLS - len(row))
         rows.append({
-            "row_number": i,
+            "row_number":       i,
             Col.COMPANY:        padded[Col.COMPANY - 1].strip(),
             Col.FIRST_NAME:     padded[Col.FIRST_NAME - 1].strip(),
             Col.LAST_NAME:      padded[Col.LAST_NAME - 1].strip(),
@@ -143,16 +129,15 @@ def get_all_rows(sheet: gspread.Worksheet) -> list[dict]:
             Col.CONTACT_ID:     padded[Col.CONTACT_ID - 1].strip(),
             Col.IS_SHOWN:       padded[Col.IS_SHOWN - 1].strip(),
             Col.AI_BERICHT:     padded[Col.AI_BERICHT - 1].strip(),
+            Col.AI_TOKENS:      padded[Col.AI_TOKENS - 1].strip(),
         })
     return rows
 
 
 def get_rows_for_ai(sheet: gspread.Worksheet) -> list[dict]:
     """
-    Rijen die klaar zijn voor AI generatie:
-      - Hebben een email
-      - AI Status is leeg of PENDING
-      - Verplichte meta-velden zijn ingevuld (Consultant, Vestiging, Type, Hoe contact)
+    Rijen klaar voor AI generatie.
+    🔴 DRY RUN rijen worden opnieuw aangeboden zodat je ze alsnog echt kunt genereren.
     """
     all_rows = get_all_rows(sheet)
     eligible = []
@@ -161,16 +146,11 @@ def get_rows_for_ai(sheet: gspread.Worksheet) -> list[dict]:
     for row in all_rows:
         if not row[Col.EMAIL] or "@" not in row[Col.EMAIL]:
             continue
-
-        # DNC en suppressie overslaan — al vroeg gemarkeerd na search
         if row[Col.MAIL_STATUS] in (MailStatus.DNC, MailStatus.SUPPRESSED):
             continue
-
-        ai_status = row[Col.AI_STATUS]
-        if ai_status in (AIStatus.DONE, AIStatus.RUNNING):
+        # DONE en RUNNING overslaan — DRY RUN mag opnieuw
+        if row[Col.AI_STATUS] in (AIStatus.DONE, AIStatus.RUNNING):
             continue
-
-        # Controleer verplichte meta-velden
         missing = [
             name for col, name in zip(REQUIRED_META_COLS, REQUIRED_META_NAMES)
             if not row[col]
@@ -178,29 +158,26 @@ def get_rows_for_ai(sheet: gspread.Worksheet) -> list[dict]:
         if missing:
             skipped_meta += 1
             continue
-
         eligible.append(row)
 
     if skipped_meta:
         print(f"[SHEETS] ⚠ {skipped_meta} rijen overgeslagen — verplichte velden ontbreken "
               f"({', '.join(REQUIRED_META_NAMES)}).")
-
     return eligible
 
 
 def get_rows_for_mail(sheet: gspread.Worksheet) -> list[dict]:
     """
-    Rijen klaar voor verzending:
-      - AI Status = DONE
-      - AI Bericht is ingevuld
-      - Mail Status is leeg of PENDING
+    Rijen klaar voor verzending.
+    🔴 DRY RUN rijen worden opnieuw aangeboden — ze zijn nog niet echt verstuurd.
+    Alleen ✅ SENT en 🚫 DNC worden uitgesloten.
     """
     all_rows = get_all_rows(sheet)
     return [
         row for row in all_rows
         if row[Col.AI_STATUS] == AIStatus.DONE
         and row[Col.AI_BERICHT]
-        and row[Col.MAIL_STATUS] not in (MailStatus.SENT, MailStatus.DRY_RUN, MailStatus.DNC)
+        and row[Col.MAIL_STATUS] not in (MailStatus.SENT, MailStatus.DNC, MailStatus.SUPPRESSED)
         and row[Col.EMAIL]
         and "@" in row[Col.EMAIL]
     ]
@@ -208,8 +185,7 @@ def get_rows_for_mail(sheet: gspread.Worksheet) -> list[dict]:
 
 # ── Terugschrijven ────────────────────────────────────────────────────────
 
-def _update_cell(sheet: gspread.Worksheet, row: int, col: int, value: str) -> None:
-    """Update één cel (1-indexed row en col)."""
+def _update_cell(sheet: gspread.Worksheet, row: int, col: int, value) -> None:
     sheet.update_cell(row, col, value)
 
 
@@ -217,32 +193,30 @@ def set_ai_status(sheet: gspread.Worksheet, row_number: int, status: str) -> Non
     _update_cell(sheet, row_number, Col.AI_STATUS, status)
 
 
-def set_ai_result(sheet: gspread.Worksheet, row_number: int, bericht: str) -> None:
-    """Schrijf het gegenereerde AI bericht en zet status op DONE."""
-    # Batch update voor minimale API calls
-    sheet.update(
-        range_name=f"I{row_number}:Y{row_number}",
-        values=[[
-            AIStatus.DONE,                          # I: AI Status
-            *[""] * (Col.AI_BERICHT - Col.AI_STATUS - 1),  # J t/m X leeg laten
-            bericht,                                # Y: AI Bericht
-        ]]
-    )
+def set_ai_result(
+    sheet: gspread.Worksheet,
+    row_number: int,
+    bericht: str,
+    dry_run: bool = False,
+) -> None:
+    """
+    Schrijf AI bericht (Y) en zet de juiste AI status (I).
+    dry_run=True  → "🔴 DRY RUN"
+    dry_run=False → "✅ DONE"
+    """
+    status = AIStatus.DRY_RUN if dry_run else AIStatus.DONE
+    _update_cell(sheet, row_number, Col.AI_STATUS,  status)
+    _update_cell(sheet, row_number, Col.AI_BERICHT, bericht)
+
+
+def set_ai_tokens(sheet: gspread.Worksheet, row_number: int, tokens: int) -> None:
+    if tokens > 0:
+        _update_cell(sheet, row_number, Col.AI_TOKENS, tokens)
 
 
 def set_ai_error(sheet: gspread.Worksheet, row_number: int, error_msg: str) -> None:
-    """Markeer rij als AI error, sla foutmelding op in Opmerking."""
-    sheet.update(
-        range_name=f"I{row_number}:N{row_number}",
-        values=[[
-            AIStatus.ERROR,   # I
-            "",               # J Mail Status
-            "",               # K Datum Mail
-            "",               # L Follow-up
-            "",               # M Reactie
-            error_msg[:500],  # N Opmerking (truncate)
-        ]]
-    )
+    _update_cell(sheet, row_number, Col.AI_STATUS, AIStatus.ERROR)
+    _update_cell(sheet, row_number, Col.OPMERKING, error_msg[:500])
 
 
 def set_mail_status(
@@ -252,14 +226,15 @@ def set_mail_status(
     message_id: str = "",
     error: str = "",
 ) -> None:
-    """Update Mail Status + Datum Mail na verzending."""
+    """
+    Update Mail Status (J) en Datum Mail (K).
+    Follow-up datum (L) en Reactie (M) worden NIET aangeraakt.
+    """
     datum = datetime.now().strftime("%d-%m-%Y %H:%M") if status == MailStatus.SENT else ""
-    opmerking = error[:500] if error else ""
-
-    sheet.update(
-        range_name=f"J{row_number}:N{row_number}",
-        values=[[status, datum, "", "", opmerking]]
-    )
+    _update_cell(sheet, row_number, Col.MAIL_STATUS, status)
+    _update_cell(sheet, row_number, Col.DATUM_MAIL,  datum)
+    if error:
+        _update_cell(sheet, row_number, Col.OPMERKING, error[:500])
 
 
 def set_enriched(sheet: gspread.Worksheet, row_number: int, enriched: bool) -> None:
@@ -278,11 +253,6 @@ def append_lusha_contacts(
     gevallen: str,
     hoe_contact: str,
 ) -> int:
-    """
-    Voeg nieuwe Lusha contacten toe aan de sheet.
-    Vult automatisch de meta-velden in.
-    Returnt het aantal toegevoegde rijen.
-    """
     if not contacts:
         return 0
 
@@ -294,24 +264,25 @@ def append_lusha_contacts(
         last  = parts[1] if len(parts) > 1 else ""
 
         row = [""] * Col.TOTAL_COLS
-        row[Col.COMPANY - 1]     = c.get("companyName", "")
-        row[Col.FIRST_NAME - 1]  = first
-        row[Col.LAST_NAME - 1]   = last
-        row[Col.JOB_TITLE - 1]   = c.get("jobTitle", "")
-        row[Col.EMAIL - 1]       = ""          # wordt gevuld bij enrichment
-        row[Col.PHONE - 1]       = ""
-        row[Col.LINKEDIN_URL - 1]= ""
-        row[Col.ENRICHED - 1]    = Enriched.NO
-        row[Col.AI_STATUS - 1]   = AIStatus.PENDING
-        row[Col.MAIL_STATUS - 1] = MailStatus.PENDING
-        row[Col.CONSULTANT - 1]  = consultant
-        row[Col.VESTIGING - 1]   = vestiging
-        row[Col.TYPE - 1]        = type_
-        row[Col.GEVALLEN - 1]    = gevallen
-        row[Col.HOE_CONTACT - 1] = hoe_contact
-        row[Col.REQUEST_ID - 1]  = request_id
-        row[Col.CONTACT_ID - 1]  = str(c.get("contactId", ""))
-        row[Col.IS_SHOWN - 1]    = "Yes" if c.get("isShown") else "No"
+        row[Col.COMPANY - 1]      = c.get("companyName", "")
+        row[Col.FIRST_NAME - 1]   = first
+        row[Col.LAST_NAME - 1]    = last
+        row[Col.JOB_TITLE - 1]    = c.get("jobTitle", "")
+        row[Col.EMAIL - 1]        = ""
+        row[Col.PHONE - 1]        = ""
+        row[Col.LINKEDIN_URL - 1] = ""
+        row[Col.ENRICHED - 1]     = Enriched.NO
+        row[Col.AI_STATUS - 1]    = AIStatus.PENDING
+        row[Col.MAIL_STATUS - 1]  = MailStatus.PENDING
+        row[Col.CONSULTANT - 1]   = consultant
+        row[Col.VESTIGING - 1]    = vestiging
+        row[Col.TYPE - 1]         = type_
+        row[Col.GEVALLEN - 1]     = gevallen
+        row[Col.HOE_CONTACT - 1]  = hoe_contact
+        row[Col.REQUEST_ID - 1]   = request_id
+        row[Col.CONTACT_ID - 1]   = str(c.get("contactId", ""))
+        row[Col.IS_SHOWN - 1]     = "Yes" if c.get("isShown") else "No"
+        row[Col.AI_TOKENS - 1]    = ""
 
         rows_to_add.append(row)
 
@@ -326,7 +297,6 @@ def update_enriched_contact(
     phone: str,
     linkedin: str,
 ) -> None:
-    """Schrijf enrichment data terug naar de juiste rij."""
     sheet.update(
         range_name=f"E{row_number}:H{row_number}",
         values=[[email, phone, linkedin, Enriched.YES]]
@@ -336,12 +306,149 @@ def update_enriched_contact(
 # ── Duplicate check ───────────────────────────────────────────────────────
 
 def get_existing_contact_ids(sheet: gspread.Worksheet) -> set[str]:
-    """Geef alle Contact IDs terug die al in de sheet staan (voor duplicate-check)."""
     all_rows = get_all_rows(sheet)
     return {row[Col.CONTACT_ID] for row in all_rows if row[Col.CONTACT_ID]}
 
 
 def get_existing_emails(sheet: gspread.Worksheet) -> set[str]:
-    """Geef alle emails terug die al in de sheet staan."""
     all_rows = get_all_rows(sheet)
     return {row[Col.EMAIL] for row in all_rows if row[Col.EMAIL] and "@" in row[Col.EMAIL]}
+
+
+# ── Sheet opschonen ───────────────────────────────────────────────────────
+
+DNC_ARCHIVE_SHEET = "DNC Archief"
+
+
+def _get_or_create_archive(spreadsheet: gspread.Spreadsheet) -> gspread.Worksheet:
+    try:
+        archive = spreadsheet.worksheet(DNC_ARCHIVE_SHEET)
+    except gspread.WorksheetNotFound:
+        archive = spreadsheet.add_worksheet(title=DNC_ARCHIVE_SHEET, rows=1000, cols=Col.TOTAL_COLS)
+        archive.append_row(HEADER_ROW, value_input_option="USER_ENTERED")
+        archive.format("1:1", {"textFormat": {"bold": True}})
+    return archive
+
+
+def cleanup_sheet(sheet: gspread.Worksheet) -> dict:
+    """
+    Schoon de sheet op:
+      - DNC rijen          → verplaatst naar 'DNC Archief' tabblad
+      - Geen email na enrich → verwijderd
+      - 🔴 DRY RUN (mail)  → blijft staan, wordt opnieuw aangeboden bij verzending
+    """
+    all_rows = get_all_rows(sheet)
+    spreadsheet = sheet.spreadsheet
+
+    moved_dnc = deleted_no_email = deleted_dry_run = 0
+    dnc_rows = []
+    delete_rows = []
+
+    for row in all_rows:
+        mail_status = row[Col.MAIL_STATUS]
+        email       = row[Col.EMAIL]
+        enriched    = row[Col.ENRICHED]
+
+        if mail_status == MailStatus.DNC:
+            dnc_rows.append(row)
+        elif enriched == Enriched.YES and not email:
+            delete_rows.append(row)
+
+    if dnc_rows:
+        archive = _get_or_create_archive(spreadsheet)
+        archive_data = [[row.get(col, "") for col in range(1, Col.TOTAL_COLS + 1)] for row in dnc_rows]
+        archive.append_rows(archive_data, value_input_option="USER_ENTERED")
+        moved_dnc = len(dnc_rows)
+
+    for row in delete_rows:
+        deleted_no_email += 1
+
+    all_to_delete = sorted(dnc_rows + delete_rows, key=lambda r: r["row_number"], reverse=True)
+
+    if all_to_delete:
+        requests = []
+        for row in all_to_delete:
+            idx = row["row_number"] - 1
+            requests.append({
+                "deleteDimension": {
+                    "range": {
+                        "sheetId":    sheet.id,
+                        "dimension":  "ROWS",
+                        "startIndex": idx,
+                        "endIndex":   idx + 1,
+                    }
+                }
+            })
+        sheet.spreadsheet.batch_update({"requests": requests})
+
+    return {
+        "moved_dnc":        moved_dnc,
+        "deleted_no_email": deleted_no_email,
+    }
+
+
+# ── Send Log tabblad ──────────────────────────────────────────────────────
+
+SEND_LOG_SHEET   = "Send Log"
+SEND_LOG_HEADERS = [
+    "Timestamp", "Consultant", "Vestiging", "Company", "First Name",
+    "Job Title", "Email", "Subject", "Status", "Message ID", "Error",
+]
+
+
+def _get_or_create_send_log(spreadsheet: gspread.Spreadsheet) -> gspread.Worksheet:
+    try:
+        return spreadsheet.worksheet(SEND_LOG_SHEET)
+    except gspread.WorksheetNotFound:
+        ws = spreadsheet.add_worksheet(title=SEND_LOG_SHEET, rows=5000, cols=len(SEND_LOG_HEADERS))
+        ws.append_row(SEND_LOG_HEADERS, value_input_option="USER_ENTERED")
+        ws.format("1:1", {"textFormat": {"bold": True}})
+        return ws
+
+
+def append_send_log_sheet(spreadsheet: gspread.Spreadsheet, record: dict) -> None:
+    ws = _get_or_create_send_log(spreadsheet)
+    ws.append_row([
+        record.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        record.get("consultant", ""),
+        record.get("vestiging", ""),
+        record.get("company", ""),
+        record.get("first_name", ""),
+        record.get("job_title", ""),
+        record.get("email", ""),
+        record.get("subject", ""),
+        record.get("status", ""),
+        record.get("message_id", ""),
+        record.get("error", ""),
+    ], value_input_option="USER_ENTERED")
+
+
+def load_suppressed_emails(sheet: gspread.Worksheet) -> set[str]:
+    """
+    Haal al-verzonden e-mailadressen op.
+    🔴 DRY RUN wordt NIET als verstuurd beschouwd — die mails zijn nooit echt gegaan.
+    Alleen ✅ SENT telt als suppressed.
+    """
+    all_rows = get_all_rows(sheet)
+    suppressed = {
+        row[Col.EMAIL].strip().lower()
+        for row in all_rows
+        if row[Col.MAIL_STATUS] == MailStatus.SENT
+        and row[Col.EMAIL]
+    }
+    if suppressed:
+        print(f"[SUPPRESSION] {len(suppressed)} e-mailadressen al verstuurd (uit sheet).")
+    return suppressed
+
+
+def load_contacted_companies(sheet: gspread.Worksheet) -> set[str]:
+    all_rows = get_all_rows(sheet)
+    companies = {
+        row[Col.COMPANY].strip().lower()
+        for row in all_rows
+        if row[Col.MAIL_STATUS] == MailStatus.SENT
+        and row[Col.COMPANY]
+    }
+    if companies:
+        print(f"[COMPANIES] {len(companies)} bedrijven al eerder benaderd (uit sheet).")
+    return companies

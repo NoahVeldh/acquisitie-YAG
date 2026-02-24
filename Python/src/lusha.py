@@ -79,7 +79,11 @@ class LushaClient:
         }
 
         resp = self.session.post(f"{BASE_URL}/contact/search/", json=payload, timeout=30)
-        resp.raise_for_status()
+        if not resp.ok:
+            print(f"[LUSHA] ❌ HTTP {resp.status_code} — response body:")
+            print(f"        {resp.text[:500]}")
+            print(f"[LUSHA] Payload verstuurd: {payload}")
+            resp.raise_for_status()
         data = resp.json()
 
         if "error" in data:

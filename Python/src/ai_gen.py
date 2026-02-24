@@ -4,8 +4,18 @@ ai_gen.py — AI bericht generatie via OpenAI
 Verantwoordelijkheden:
   - Gepersonaliseerde acquisitie e-mails genereren per lead
   - Vaste blokken (opening, pitch, signature) samenvoegen met AI-connectiezinnen
+  - Web search via OpenAI om bedrijfsinformatie op te zoeken
   - Foutafhandeling bij ontbrekende bedrijfsinfo
   - Dry-run modus (preview zonder API calls)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WIJZIGING T.O.V. VORIGE VERSIE:
+
+  generate() geeft nu een tuple terug: (bericht: str, tokens: int)
+    - tokens = input_tokens + output_tokens uit de OpenAI response
+    - Bij dry-run / preview geeft preview() een tuple terug met tokens=0
+    - Zo kan main.py het tokenverbruik per rij opslaan in de sheet (kolom Z)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 from __future__ import annotations
@@ -14,7 +24,6 @@ from openai import OpenAI
 
 
 # ── Vaste e-mail blokken ──────────────────────────────────────────────────
-# Pas hier de tekst aan voor andere consultants via .env of via parameters
 
 DEFAULT_OPENING = (
     "Ik ben {sender_name}, student {studie} aan de {universiteit} "
@@ -66,17 +75,19 @@ class AIGenerator:
         opening_template: str = DEFAULT_OPENING,
         pitch: str = DEFAULT_PITCH,
         signature_template: str = DEFAULT_SIGNATURE,
+        use_web_search: bool = True,
     ):
         if not api_key:
             raise ValueError("OpenAI API key ontbreekt. Zet OPENAI_API_KEY in .env")
 
-        self.client     = OpenAI(api_key=api_key)
-        self.model      = model
-        self.sender     = sender_name
-        self.email      = sender_email
-        self.phone      = sender_phone
-        self.studie     = studie
-        self.universiteit = universiteit
+        self.client           = OpenAI(api_key=api_key)
+        self.model            = model
+        self.sender           = sender_name
+        self.email            = sender_email
+        self.phone            = sender_phone
+        self.studie           = studie
+        self.universiteit     = universiteit
+        self.use_web_search   = use_web_search
 
         self.opening_template   = opening_template
         self.pitch              = pitch
@@ -91,37 +102,35 @@ class AIGenerator:
         company_name: str,
         website: str,
         vestiging: str = "",
-    ) -> str:
+    ) -> tuple[str, int]:
         """
         Genereer een volledig e-mailbericht voor één lead.
+        Als use_web_search=True zoekt OpenAI zelf op wat het bedrijf doet.
 
         Returns:
-            Volledig opgemaakt e-mailbericht als string.
-
-        Raises:
-            ValueError: Als verplichte velden ontbreken.
-            RuntimeError: Als de OpenAI API call mislukt.
+            (bericht, tokens) — de volledige mail-tekst en het totale tokenverbruik
+            tokens = input_tokens + output_tokens uit de OpenAI response
         """
         if not company_name:
             raise ValueError("company_name is verplicht voor AI generatie")
         if not first_name:
             raise ValueError("first_name is verplicht voor AI generatie")
 
-        # Stap 1: genereer de connectiezinnen via AI
-        connection_text = self._generate_connection_sentences(
+        connection_text, tokens = self._generate_connection_sentences(
             first_name=first_name,
             job_title=job_title,
             company_name=company_name,
             website=website,
         )
 
-        # Stap 2: stel het volledige bericht samen
-        return self._assemble_email(
+        bericht = self._assemble_email(
             first_name=first_name,
             company_name=company_name,
             connection_text=connection_text,
             vestiging=vestiging,
         )
+
+        return bericht, tokens
 
     def preview(
         self,
@@ -129,14 +138,20 @@ class AIGenerator:
         company_name: str,
         connection_placeholder: str = "[AI CONNECTIEZINNEN KOMEN HIER]",
         vestiging: str = "",
-    ) -> str:
-        """Genereer een preview zonder API call (dry-run)."""
-        return self._assemble_email(
+    ) -> tuple[str, int]:
+        """
+        Genereer een preview zonder API call (dry-run).
+
+        Returns:
+            (bericht, 0) — tokens is altijd 0 bij een preview
+        """
+        bericht = self._assemble_email(
             first_name=first_name,
             company_name=company_name,
             connection_text=connection_placeholder,
             vestiging=vestiging,
         )
+        return bericht, 0
 
     # ── Interne methodes ──────────────────────────────────────────────────
 
@@ -146,49 +161,66 @@ class AIGenerator:
         job_title: str,
         company_name: str,
         website: str,
-    ) -> str:
+    ) -> tuple[str, int]:
         """
         Vraag OpenAI om 2-3 gepersonaliseerde connectiezinnen.
+        Met web search zoekt het model eerst op wat het bedrijf doet.
+
+        Returns:
+            (tekst, tokens) — de connectiezinnen en het totale tokenverbruik
         """
-        website_info = f"(website: {website})" if website else "(geen website beschikbaar)"
+        website_hint = f"Hun website is {website}." if website else ""
 
         prompt = f"""
-Zoek op wat {company_name} doet {website_info}.
-De ontvanger is {first_name}, {job_title} — hij/zij weet wat zijn/haar bedrijf doet, vat het dus NIET samen.
+Zoek op wat {company_name} doet. {website_hint}
+De ontvanger is {first_name}, {job_title} bij {company_name}.
 
 Schrijf precies 2-3 zinnen (platte tekst, geen opmaak, geen links, geen haakjes) die uitleggen
 waarom {self.sender}, student {self.studie} ({self.universiteit}), specifiek bij {company_name} uitkwam.
 
 Schrijf vanuit {self.sender.split()[0]}s perspectief en interesse:
-- Welk thema uit zijn studie (logistiek, processen, strategie, data, techniek, operations) 
-  is relevant voor hun sector?
-- Welk type vraagstuk speelt er in hun branche?
-- Wees concreet en specifiek voor dit bedrijf.
+- Welk thema uit zijn studie (logistiek, processen, strategie, data, techniek, operations)
+  is relevant voor hun sector of actuele uitdagingen?
+- Wees concreet en specifiek — gebruik wat je via web search gevonden hebt.
+- De ontvanger weet wat zijn bedrijf doet, vat het dus NIET samen.
 
 Verboden: "innovatief", "onder de indruk", "met interesse gevolgd", URLs, of haakjes met links.
 
 Geef ALLEEN de 2-3 zinnen terug, niets anders.
 """.strip()
 
+        tools = [{"type": "web_search_preview"}] if self.use_web_search else []
+
         response = self.client.responses.create(
             model=self.model,
+            tools=tools if tools else None,
             input=[{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
         )
 
-        # Parse output
-        output_text = getattr(response, "output_text", None) or ""
+        # Lees tokenverbruik uit de response
+        usage = getattr(response, "usage", None)
+        if usage:
+            tokens = getattr(usage, "input_tokens", 0) + getattr(usage, "output_tokens", 0)
+        else:
+            tokens = 0
+
+        # Parse output tekst
+        output_text = ""
+        for item in (response.output or []):
+            if getattr(item, "type", "") == "message":
+                for c in (item.content or []):
+                    if getattr(c, "type", "") == "output_text":
+                        output_text = c.text
+                        break
+
+        # Fallback voor oudere response structuur
         if not output_text:
-            for item in (response.output or []):
-                if item.type == "message":
-                    for c in (item.content or []):
-                        if c.type == "output_text":
-                            output_text = c.text
-                            break
+            output_text = getattr(response, "output_text", "") or ""
 
         if not output_text.strip():
             raise RuntimeError("OpenAI gaf een lege response terug")
 
-        return output_text.strip()
+        return output_text.strip(), tokens
 
     def _assemble_email(
         self,
