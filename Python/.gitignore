@@ -14,8 +14,7 @@ consultants/*.env
 !consultants/.env.example
 
 # Google credentials (nooit committen!)
-credentials/
-*.json
+credentials/*.json
 
 # Output / logs (bevatten PII)
 output/
