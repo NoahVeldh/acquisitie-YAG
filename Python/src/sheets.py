@@ -230,7 +230,7 @@ def set_mail_status(
     Update Mail Status (J) en Datum Mail (K).
     Follow-up datum (L) en Reactie (M) worden NIET aangeraakt.
     """
-    datum = datetime.now().strftime("%d-%m-%Y %H:%M") if status == MailStatus.SENT else ""
+    datum = datetime.now().strftime("%d-%m-%Y") if status == MailStatus.SENT else ""
     _update_cell(sheet, row_number, Col.MAIL_STATUS, status)
     _update_cell(sheet, row_number, Col.DATUM_MAIL,  datum)
     if error:
