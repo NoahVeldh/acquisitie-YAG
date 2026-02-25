@@ -226,7 +226,7 @@ def _load_config() -> dict:
         "sender_name":         _env("SENDER_NAME"),
         "sender_email":        _env("SENDER_EMAIL"),
         "sender_phone":        _env("SENDER_PHONE"),
-        "sender_linkedin":    _env("SENDER_LINKEDIN", "www.linkedin.com/in/"),
+        "sender_linkedin":     _env("SENDER_LINKEDIN", ""),
         "studie":              _env("STUDIE", "Technische Bedrijfskunde"),
         "universiteit":        _env("UNIVERSITEIT", "TU Eindhoven"),
         "subject_template":    _env("SUBJECT_TEMPLATE", "Young Advisory Group x {company}"),
@@ -235,6 +235,12 @@ def _load_config() -> dict:
         "max_emails":          _env_int("MAX_EMAILS", 20),
         "rate_limit_sec":      float(_env("RATE_LIMIT_SEC", "2")),
         "dnc_path":            _env("DNC_PATH", "data/Niet Benaderen.xlsx"),
+        # Pad naar logo bestand (PNG of JPG). Leeg = geen logo in handtekening.
+        # Aanbevolen: assets/logo.png  (lossless, transparantie, beste compatibiliteit)
+        "logo_path":           _env("LOGO_PATH", ""),
+        # Leeg = geen bijlage. Bestand niet gevonden = waarschuwing + mail
+        # verstuurd zonder bijlage.
+        "attachment_pdf":      _env("ATTACHMENT_PDF", ""),
         "vestiging_default":   _env("VESTIGING_DEFAULT", "Eindhoven-Tilburg"),
         "type_default":        _env("TYPE_DEFAULT", "Cold"),
         "gevallen_default":    _env("GEVALLEN_DEFAULT", ""),
@@ -563,7 +569,10 @@ def step_ai_generate(cfg: dict, sheet) -> None:
                     first_name=row[Col.FIRST_NAME],
                     job_title=row[Col.JOB_TITLE],
                     company_name=company,
-                    website="",
+                    # LinkedIn URL ingevuld door Lusha enrich (kolom G).
+                    # ai_gen.py gebruikt dit als zoekhint om via web search
+                    # de website en context van het bedrijf op te halen.
+                    website=row[Col.LINKEDIN_URL],
                     vestiging=row[Col.VESTIGING],
                 )
 
@@ -656,11 +665,19 @@ def step_send_mail(cfg: dict, sheet) -> None:
     max_send = int(max_input) if max_input.isdigit() else max_send
     sendable = sendable[:max_send]
 
+    # ── Preview eerste mail ───────────────────────────────────────────────
     print(f"\n── Preview eerste mail ──────────────────────────────")
     first = sendable[0]
     print(f"  Aan:       {first[Col.EMAIL]}")
     print(f"  Bedrijf:   {first[Col.COMPANY]}")
     print(f"  Onderwerp: {AIGenerator.subject(first[Col.COMPANY], cfg['subject_template'])}")
+    if cfg["logo_path"]:
+        logo_exists = "✅" if Path(cfg["logo_path"]).exists() else "⚠ niet gevonden"
+        print(f"  Logo:      {cfg['logo_path']}  {logo_exists}")
+    if cfg["attachment_pdf"]:
+        pdf_path = Path(cfg["attachment_pdf"])
+        pdf_label = pdf_path.name if pdf_path.exists() else f"{cfg['attachment_pdf']}  ⚠ niet gevonden"
+        print(f"  Bijlage:   📎 {pdf_label}")
     print(f"  Body preview:\n")
     for line in first[Col.AI_BERICHT][:400].split("\n"):
         print(f"    {line}")
@@ -714,6 +731,8 @@ def step_send_mail(cfg: dict, sheet) -> None:
                     sender_phone=cfg["sender_phone"],
                     sender_linkedin=cfg["sender_linkedin"],
                     vestiging=row[Col.VESTIGING] or cfg["vestiging_default"],
+                    attachment_pdf=cfg["attachment_pdf"],
+                    logo_path=cfg["logo_path"],
                 )
                 set_mail_status(sheet, row["row_number"], MailStatus.SENT, message_id=message_id)
                 append_send_log_sheet(sheet.spreadsheet, {
@@ -805,6 +824,13 @@ def step_overview(cfg: dict, sheet) -> None:
     print(f"    Consultant: {cfg['sender_name']}")
     print(f"    DRY_RUN:    {cfg['dry_run']}")
     print(f"    MAX_EMAILS: {cfg['max_emails']}")
+    if cfg["logo_path"]:
+        logo_exists = "✅" if Path(cfg["logo_path"]).exists() else "⚠ niet gevonden"
+        print(f"    Logo:        {cfg['logo_path']}  {logo_exists}")
+    if cfg["attachment_pdf"]:
+        pdf_path = Path(cfg["attachment_pdf"])
+        exists_label = "✅" if pdf_path.exists() else "⚠ niet gevonden"
+        print(f"    PDF bijlage: {cfg['attachment_pdf']}  {exists_label}")
 
     # ── Lusha paginateller ────────────────────────────────────────────────
     page_state = _load_page_state()
