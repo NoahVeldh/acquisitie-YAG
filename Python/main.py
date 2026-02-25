@@ -139,6 +139,7 @@ from src.sheets import (
 from src.lusha import LushaClient, ICP_PRESETS
 from src.ai_gen import AIGenerator
 from src.storage import load_do_not_contact, is_do_not_contact
+from src.recent_contacts import load_recent_contacts, is_recent_contact
 from src.gmail_send import send_email, verify_connection
 
 
@@ -235,6 +236,7 @@ def _load_config() -> dict:
         "max_emails":          _env_int("MAX_EMAILS", 20),
         "rate_limit_sec":      float(_env("RATE_LIMIT_SEC", "2")),
         "dnc_path":            _env("DNC_PATH", "data/Niet Benaderen.xlsx"),
+        "recent_contacts_path": _env("RECENT_CONTACTS_PATH", "data/Laatste_Contactmomenten.xlsx"),
         # Pad naar logo bestand (PNG of JPG). Leeg = geen logo in handtekening.
         # Aanbevolen: assets/logo.png  (lossless, transparantie, beste compatibiliteit)
         "logo_path":           _env("LOGO_PATH", ""),
@@ -430,6 +432,36 @@ def step_lusha_search(cfg: dict, sheet) -> None:
     else:
         print("[DNC] ✅ Geen matches gevonden.")
 
+    # ── Recent contact check ──────────────────────────────────────────────
+    print("\n[RECENT] Laatste contactmomenten controleren op nieuwe leads...")
+    try:
+        recent = load_recent_contacts(cfg["recent_contacts_path"])
+    except FileNotFoundError as e:
+        print(f"[RECENT] ⚠ {e}")
+        print("[RECENT] Check overgeslagen — zet RECENT_CONTACTS_PATH correct in .env")
+        return
+
+    all_rows   = get_all_rows(sheet)
+    rc_marked  = 0
+
+    for row in all_rows:
+        company     = row[Col.COMPANY]
+        mail_status = row[Col.MAIL_STATUS]
+
+        if mail_status not in ("", MailStatus.PENDING):
+            continue
+
+        blocked, reason = is_recent_contact(company, recent)
+        if blocked:
+            set_mail_status(sheet, row["row_number"], MailStatus.RECENT_CONTACT, error=reason)
+            print(f"  ⏳ RECENT CONTACT: {company}  ({reason})")
+            rc_marked += 1
+
+    if rc_marked:
+        print(f"[RECENT] {rc_marked} lead(s) gemarkeerd als ⏳ RECENT CONTACT.")
+    else:
+        print("[RECENT] ✅ Geen recente contacten gevonden.")
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # Stap 2 — Leads enrichen
@@ -444,7 +476,9 @@ def step_lusha_enrich(cfg: dict, sheet) -> None:
     to_enrich = [
         row for row in all_rows
         if row[Col.ENRICHED] not in ("✅ Yes",)
-        and row[Col.MAIL_STATUS] not in (MailStatus.DNC, MailStatus.SUPPRESSED)
+        and row[Col.MAIL_STATUS] not in (
+            MailStatus.DNC, MailStatus.SUPPRESSED, MailStatus.RECENT_CONTACT,
+        )
         and row[Col.CONTACT_ID]
         and row[Col.REQUEST_ID]
     ]
@@ -461,6 +495,7 @@ def step_lusha_enrich(cfg: dict, sheet) -> None:
         by_request.setdefault(rid, []).append(row)
 
     total_enriched = 0
+    total_no_email = 0
     total_errors   = 0
 
     for request_id, rows in by_request.items():
@@ -484,18 +519,31 @@ def step_lusha_enrich(cfg: dict, sheet) -> None:
                 print(f"  ⚠ Contact ID {cid} niet terug in response.")
                 continue
 
+            email = data.get("email", "")
+
             update_enriched_contact(
                 sheet=sheet,
                 row_number=row["row_number"],
-                email=data.get("email", ""),
+                email=email,
                 phone=data.get("phone", ""),
                 linkedin=data.get("linkedin", ""),
             )
-            total_enriched += 1
-            print(f"  ✅ {row[Col.COMPANY]} | {row[Col.FIRST_NAME]} → {data.get('email', '(geen email)')}")
+
+            if email:
+                total_enriched += 1
+                print(f"  ✅ {row[Col.COMPANY]} | {row[Col.FIRST_NAME]} → {email}")
+            else:
+                total_no_email += 1
+                print(f"  ⚠ {row[Col.COMPANY]} | {row[Col.FIRST_NAME]} → geen email gevonden  [⚠ GEEN EMAIL]")
+
             time.sleep(0.2)
 
-    print(f"\n[ENRICH] Klaar. ✅ {total_enriched} verrijkt, ❌ {total_errors} fouten.")
+    print(f"\n[ENRICH] Klaar.")
+    print(f"  ✅ {total_enriched} verrijkt met email")
+    if total_no_email:
+        print(f"  ⚠  {total_no_email} zonder email → status '⚠ GEEN EMAIL' (overgeslagen bij AI + verzending)")
+    if total_errors:
+        print(f"  ❌ {total_errors} fouten")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -511,6 +559,7 @@ def step_ai_generate(cfg: dict, sheet) -> None:
         print("[AI] Geen leads gevonden die klaar zijn voor AI generatie.")
         print("     Controleer of de verplichte velden ingevuld zijn "
               "(Consultant, Vestiging, Type, Hoe contact).")
+        print("     Rijen met ⚠ GEEN EMAIL worden overgeslagen — Lusha vond geen emailadres.")
         return
 
     dry_run_rows = [r for r in rows if r[Col.AI_STATUS] == AIStatus.DRY_RUN]
@@ -613,6 +662,7 @@ def step_send_mail(cfg: dict, sheet) -> None:
         print("[MAIL] Geen leads gevonden klaar voor verzending.")
         print("       Zorg dat AI Status = ✅ DONE en Mail Status leeg/PENDING is.")
         print("       Rijen met 🔴 DRY RUN worden niet verstuurd — genereer ze eerst echt via stap 3.")
+        print("       Rijen met ⚠ GEEN EMAIL worden permanent overgeslagen — Lusha vond geen emailadres.")
         return
 
     dnc_set             = load_do_not_contact(cfg["dnc_path"])
@@ -867,16 +917,26 @@ def step_cleanup(cfg: dict, sheet) -> None:
 
     all_rows = get_all_rows(sheet)
 
-    preview_dnc      = sum(1 for r in all_rows if r[Col.MAIL_STATUS] == MailStatus.DNC)
-    preview_no_email = sum(1 for r in all_rows
-                          if r[Col.ENRICHED] == "✅ Yes" and not r[Col.EMAIL])
+    preview_dnc           = sum(1 for r in all_rows if r[Col.MAIL_STATUS] == MailStatus.DNC)
+    preview_no_email_status = sum(1 for r in all_rows if r[Col.MAIL_STATUS] == MailStatus.NO_EMAIL)
+    preview_no_email_legacy = sum(
+        1 for r in all_rows
+        if r[Col.ENRICHED] == "✅ Yes"
+        and not r[Col.EMAIL]
+        and r[Col.MAIL_STATUS] != MailStatus.NO_EMAIL
+    )
+    preview_recent_contact = sum(1 for r in all_rows if r[Col.MAIL_STATUS] == MailStatus.RECENT_CONTACT)
 
     print(f"\n  Dit wordt opgeschoond:\n")
     print(f"    📦 DNC rijen verplaatst naar 'DNC Archief' tabblad:  {preview_dnc}")
-    print(f"    🗑  Geen email gevonden na enrich:                   {preview_no_email}")
+    print(f"    🗑  Geen email gevonden (⚠ GEEN EMAIL status):        {preview_no_email_status}")
+    if preview_no_email_legacy:
+        print(f"    🗑  Geen email gevonden (legacy, zonder status):     {preview_no_email_legacy}")
     print(f"    ℹ  🔴 DRY RUN rijen blijven staan (worden opnieuw aangeboden bij stap 4)")
+    if preview_recent_contact:
+        print(f"    📦 ⏳ RECENT CONTACT ({preview_recent_contact} rijen) → 'Recent Contact Archief' tabblad")
 
-    total = preview_dnc + preview_no_email
+    total = preview_dnc + preview_no_email_status + preview_no_email_legacy
     if total == 0:
         print("\n  ✅ Sheet is al schoon, niets te doen.")
         return
@@ -890,6 +950,8 @@ def step_cleanup(cfg: dict, sheet) -> None:
 
     print(f"\n  ✅ Klaar:")
     print(f"    📦 {result['moved_dnc']} DNC rijen → 'DNC Archief' tabblad")
+    if result['moved_recent']:
+        print(f"    📦 {result['moved_recent']} Recent Contact rijen → 'Recent Contact Archief' tabblad")
     print(f"    🗑  {result['deleted_no_email']} rijen zonder email verwijderd")
 
 

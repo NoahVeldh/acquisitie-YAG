@@ -10,7 +10,14 @@ Verantwoordelijkheden:
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 WIJZIGING T.O.V. VORIGE VERSIE:
+  Prompt herschreven voor persoonlijker resultaat:
+    - Ontvanger wordt direct aangesproken (jij/jouw/jullie), nooit meer "hun/het bedrijf"
+    - Connectiezinnen starten vanuit de uitdaging/ambitie van de ontvanger, niet
+      vanuit Rick's persoonlijke interesse
+    - "Wij/we" voor YAG-capabilities, "ik" alleen voor persoonlijke noot van Rick
+    - C-suite toon: direct en bondig, geen lof of vleierij
 
+EERDERE WIJZIGINGEN:
   URL-stripping toegevoegd als post-processing stap
     - _strip_urls() verwijdert alle URLs en losse domeinnamen uit de gegenereerde tekst
     - Pakt: https://..., http://..., www.bedrijf.nl, bedrijf.com/pad etc.
@@ -18,7 +25,6 @@ WIJZIGING T.O.V. VORIGE VERSIE:
     - Dubbele spaties en spaties voor leestekens worden automatisch opgeruimd
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
-
 from __future__ import annotations
 
 import re
@@ -46,7 +52,8 @@ van gezond opgroeien te benadrukken.
 Graag zou ik willen voorstellen om een gesprek in te plannen, waarin we kennis kunnen maken \
 en de mogelijkheden voor een eventuele samenwerking kunnen verkennen.
 
-Ik hoor graag of dit schikt en bij verdere vragen ben ik altijd bereikbaar!"""
+Ik hoor graag of dit schikt en bij verdere vragen ben ik altijd bereikbaar!\
+"""
 
 DEFAULT_SIGNATURE = """\
 Met vriendelijke groet,
@@ -92,10 +99,10 @@ def _strip_urls(text: str) -> str:
     """
     cleaned = _URL_PATTERN.sub("", text)
     cleaned = re.sub(r"\(\[.*?\]\(\s*\)\)", "", cleaned)   # ([tekst]())
-    cleaned = re.sub(r"\[.*?\]\(\s*\)", "", cleaned)          # [tekst]()
-    cleaned = re.sub(r"\(\s*\)", "", cleaned)                    # lege () haakjes
-    cleaned = _PUNCT_SPACE.sub(r"\1", cleaned)                    # spatie voor leesteken weg
-    cleaned = re.sub(r" {2,}", " ", cleaned)                       # dubbele spaties -> een
+    cleaned = re.sub(r"\[.*?\]\(\s*\)", "", cleaned)        # [tekst]()
+    cleaned = re.sub(r"\(\s*\)", "", cleaned)               # lege () haakjes
+    cleaned = _PUNCT_SPACE.sub(r"\1", cleaned)              # spatie voor leesteken weg
+    cleaned = re.sub(r" {2,}", " ", cleaned)                # dubbele spaties -> een
     cleaned = "\n".join(line.strip() for line in cleaned.splitlines())
     return cleaned.strip()
 
@@ -120,17 +127,15 @@ class AIGenerator:
     ):
         if not api_key:
             raise ValueError("OpenAI API key ontbreekt. Zet OPENAI_API_KEY in .env")
-
-        self.client           = OpenAI(api_key=api_key)
-        self.model            = model
-        self.sender           = sender_name
-        self.email            = sender_email
-        self.phone            = sender_phone
-        self.linkedin         = sender_linkedin
-        self.studie           = studie
-        self.universiteit     = universiteit
-        self.use_web_search   = use_web_search
-
+        self.client             = OpenAI(api_key=api_key)
+        self.model              = model
+        self.sender             = sender_name
+        self.email              = sender_email
+        self.phone              = sender_phone
+        self.linkedin           = sender_linkedin
+        self.studie             = studie
+        self.universiteit       = universiteit
+        self.use_web_search     = use_web_search
         self.opening_template   = opening_template
         self.pitch              = pitch
         self.signature_template = signature_template
@@ -174,7 +179,6 @@ class AIGenerator:
             connection_text=connection_text,
             vestiging=vestiging,
         )
-
         return bericht, tokens
 
     def preview(
@@ -214,22 +218,34 @@ class AIGenerator:
         Returns:
             (tekst, tokens) — de connectiezinnen en het totale tokenverbruik
         """
-        website_hint = f"Hun website is {website}." if website else ""
+        website_hint = f"De website is {website}." if website else ""
+        sender_first = self.sender.split()[0]
 
         prompt = f"""
-Zoek op wat {company_name} doet. {website_hint}
-De ontvanger is {first_name}, {job_title} bij {company_name}.
+Zoek op wat {company_name} doet en welke uitdagingen of strategische ambities relevant zijn \
+voor {first_name} als {job_title}. {website_hint}
 
-Schrijf precies 2-3 zinnen (platte tekst, geen opmaak, geen links, geen haakjes) die uitleggen
-waarom {self.sender}, student {self.studie} ({self.universiteit}), specifiek bij {company_name} uitkwam.
+Schrijf precies 2-3 zinnen in vloeiend Nederlands, direct gericht aan {first_name} persoonlijk. \
+{sender_first} schrijft namens Young Advisory Group (YAG), een studenten-adviesbureau.
 
-Schrijf vanuit {self.sender.split()[0]}s perspectief en interesse:
-- Welk thema uit zijn studie (logistiek, processen, strategie, data, techniek, operations)
-  is relevant voor hun sector of actuele uitdagingen?
-- Wees concreet en specifiek — gebruik wat je via web search gevonden hebt.
-- De ontvanger weet wat zijn bedrijf doet, vat het dus NIET samen.
+Gewenste structuur:
+1. Eerste zin: {sender_first} vertelt wat hem persoonlijk aansprak aan {company_name} — \
+   iets concreets wat hij tegenkwam tijdens zijn studie {self.studie} \
+   (denk aan logistiek, operations, strategie, data, procesoptimalisatie). \
+   Dit is een persoonlijke noot van {sender_first}, dus gebruik "ik" en wees specifiek.
+2. Tweede/derde zin: maak de brug naar wat YAG kan betekenen voor {first_name} \
+   — gebruik "wij/we" voor YAG's aanpak. Spreek {first_name} direct aan \
+   met "jij/jouw/jullie".
 
-Verboden: "innovatief", "onder de indruk", "met interesse gevolgd", URLs, of haakjes met links.
+Harde regels:
+- Spreek {first_name} altijd direct aan: "jij", "jouw", "jullie" — \
+  NOOIT "het bedrijf", "hen", "hun" of "{company_name}" als derde persoon
+- Geen vleierij: niet beginnen met "Ik ben gefascineerd door..." of \
+  "Ik volg jullie met interesse"
+- Geen URLs, geen haakjes met links
+- Geen woorden als "innovatief", "onder de indruk", "disruptief"
+- Vat NIET samen wat {company_name} doet — {first_name} weet dat zelf
+- Toon: direct en bondig, geschikt voor C-suite
 
 Geef ALLEEN de 2-3 zinnen terug, niets anders.
 """.strip()
@@ -275,13 +291,11 @@ Geef ALLEEN de 2-3 zinnen terug, niets anders.
         vestiging: str = "",
     ) -> str:
         """Stel het volledige e-mailbericht samen uit de vaste blokken + AI tekst."""
-
         opening = self.opening_template.format(
             sender_name=self.sender,
             studie=self.studie,
             universiteit=self.universiteit,
         )
-
         signature = self.signature_template.format(
             sender_name=self.sender,
             sender_email=self.email,
@@ -289,7 +303,6 @@ Geef ALLEEN de 2-3 zinnen terug, niets anders.
             sender_linkedin=self.linkedin,
             vestiging=vestiging or "Eindhoven-Tilburg",
         )
-
         lines = [
             f"Beste {first_name},",
             "",
@@ -299,7 +312,6 @@ Geef ALLEEN de 2-3 zinnen terug, niets anders.
             "",
             signature,
         ]
-
         return "\n".join(lines)
 
     @staticmethod

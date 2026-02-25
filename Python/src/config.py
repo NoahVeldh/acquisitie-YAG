@@ -32,7 +32,6 @@ Sheet kolom layout:
   Y=25  AI Bericht
   Z=26  AI Tokens
 """
-
 from __future__ import annotations
 
 
@@ -90,13 +89,14 @@ class AIStatus:
 
 
 class MailStatus:
-    PENDING    = "PENDING"
-    DRY_RUN    = "🔴 DRY RUN"  # testrun, wordt opnieuw aangeboden bij volgende verzending
-    SENT       = "✅ SENT"
-    ERROR      = "❌ ERROR"
-    DNC        = "🚫 DNC"
-    SUPPRESSED = "⏭ AL GEMAILD"
-    NO_EMAIL   = "⚠ GEEN EMAIL"
+    PENDING         = "PENDING"
+    DRY_RUN         = "🔴 DRY RUN"        # testrun, wordt opnieuw aangeboden bij volgende verzending
+    SENT            = "✅ SENT"
+    ERROR           = "❌ ERROR"
+    DNC             = "🚫 DNC"
+    SUPPRESSED      = "⏭ AL GEMAILD"
+    NO_EMAIL        = "⚠ GEEN EMAIL"      # na enrich: geen emailadres gevonden
+    RECENT_CONTACT  = "⏳ RECENT CONTACT"  # bedrijf al recentelijk benaderd (cooldown)
 
 
 class Enriched:

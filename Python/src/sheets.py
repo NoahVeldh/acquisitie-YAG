@@ -4,7 +4,14 @@ sheets.py — Google Sheets connectie en alle lees/schrijf operaties
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 WIJZIGINGEN T.O.V. VORIGE VERSIE:
 
-  NIEUW — MailStatus.DRY_RUN is nu "🔴 DRY RUN" (was "DRY RUN")
+  NIEUW — MailStatus.NO_EMAIL "⚠ GEEN EMAIL"
+    - update_enriched_contact() zet Mail Status op ⚠ GEEN EMAIL als er
+      na enrichment geen emailadres gevonden is
+    - get_rows_for_ai() sluit ⚠ GEEN EMAIL rijen uit — ze worden niet ge-AI'd
+    - get_rows_for_mail() sluit ⚠ GEEN EMAIL rijen al uit via AI Status check
+    - cleanup_sheet() verwijdert ⚠ GEEN EMAIL rijen automatisch
+
+  EERDER — MailStatus.DRY_RUN is "🔴 DRY RUN" (was "DRY RUN")
     - get_rows_for_mail() sluit 🔴 DRY RUN niet meer uit
       → rijen worden opnieuw aangeboden bij de volgende verzendpoging
     - load_suppressed_emails() telt 🔴 DRY RUN niet meer als "al verstuurd"
@@ -138,6 +145,7 @@ def get_rows_for_ai(sheet: gspread.Worksheet) -> list[dict]:
     """
     Rijen klaar voor AI generatie.
     🔴 DRY RUN rijen worden opnieuw aangeboden zodat je ze alsnog echt kunt genereren.
+    ⚠ GEEN EMAIL rijen worden overgeslagen — geen email = geen mail mogelijk.
     """
     all_rows = get_all_rows(sheet)
     eligible = []
@@ -146,7 +154,10 @@ def get_rows_for_ai(sheet: gspread.Worksheet) -> list[dict]:
     for row in all_rows:
         if not row[Col.EMAIL] or "@" not in row[Col.EMAIL]:
             continue
-        if row[Col.MAIL_STATUS] in (MailStatus.DNC, MailStatus.SUPPRESSED):
+        if row[Col.MAIL_STATUS] in (
+            MailStatus.DNC, MailStatus.SUPPRESSED,
+            MailStatus.NO_EMAIL, MailStatus.RECENT_CONTACT,
+        ):
             continue
         # DONE en RUNNING overslaan — DRY RUN mag opnieuw
         if row[Col.AI_STATUS] in (AIStatus.DONE, AIStatus.RUNNING):
@@ -170,14 +181,20 @@ def get_rows_for_mail(sheet: gspread.Worksheet) -> list[dict]:
     """
     Rijen klaar voor verzending.
     🔴 DRY RUN rijen worden opnieuw aangeboden — ze zijn nog niet echt verstuurd.
-    Alleen ✅ SENT en 🚫 DNC worden uitgesloten.
+    ✅ SENT, 🚫 DNC, ⏭ AL GEMAILD en ⚠ GEEN EMAIL worden uitgesloten.
     """
     all_rows = get_all_rows(sheet)
     return [
         row for row in all_rows
         if row[Col.AI_STATUS] == AIStatus.DONE
         and row[Col.AI_BERICHT]
-        and row[Col.MAIL_STATUS] not in (MailStatus.SENT, MailStatus.DNC, MailStatus.SUPPRESSED)
+        and row[Col.MAIL_STATUS] not in (
+            MailStatus.SENT,
+            MailStatus.DNC,
+            MailStatus.SUPPRESSED,
+            MailStatus.NO_EMAIL,
+            MailStatus.RECENT_CONTACT,
+        )
         and row[Col.EMAIL]
         and "@" in row[Col.EMAIL]
     ]
@@ -297,10 +314,17 @@ def update_enriched_contact(
     phone: str,
     linkedin: str,
 ) -> None:
+    """
+    Schrijf verrijkte contactgegevens terug naar de sheet.
+    Als er geen email gevonden is, wordt Mail Status op ⚠ GEEN EMAIL gezet
+    zodat de rij overgeslagen wordt bij AI-generatie, verzending en cleanup.
+    """
     sheet.update(
         range_name=f"E{row_number}:H{row_number}",
         values=[[email, phone, linkedin, Enriched.YES]]
     )
+    if not email:
+        _update_cell(sheet, row_number, Col.MAIL_STATUS, MailStatus.NO_EMAIL)
 
 
 # ── Duplicate check ───────────────────────────────────────────────────────
@@ -317,7 +341,8 @@ def get_existing_emails(sheet: gspread.Worksheet) -> set[str]:
 
 # ── Sheet opschonen ───────────────────────────────────────────────────────
 
-DNC_ARCHIVE_SHEET = "DNC Archief"
+DNC_ARCHIVE_SHEET            = "DNC Archief"
+RECENT_CONTACT_ARCHIVE_SHEET = "Recent Contact Archief"
 
 
 def _get_or_create_archive(spreadsheet: gspread.Spreadsheet) -> gspread.Worksheet:
@@ -330,19 +355,35 @@ def _get_or_create_archive(spreadsheet: gspread.Spreadsheet) -> gspread.Workshee
     return archive
 
 
+def _get_or_create_recent_archive(spreadsheet: gspread.Spreadsheet) -> gspread.Worksheet:
+    try:
+        archive = spreadsheet.worksheet(RECENT_CONTACT_ARCHIVE_SHEET)
+    except gspread.WorksheetNotFound:
+        archive = spreadsheet.add_worksheet(
+            title=RECENT_CONTACT_ARCHIVE_SHEET, rows=1000, cols=Col.TOTAL_COLS
+        )
+        archive.append_row(HEADER_ROW, value_input_option="USER_ENTERED")
+        archive.format("1:1", {"textFormat": {"bold": True}})
+    return archive
+
+
 def cleanup_sheet(sheet: gspread.Worksheet) -> dict:
     """
     Schoon de sheet op:
-      - DNC rijen          → verplaatst naar 'DNC Archief' tabblad
-      - Geen email na enrich → verwijderd
-      - 🔴 DRY RUN (mail)  → blijft staan, wordt opnieuw aangeboden bij verzending
+      - DNC rijen             → verplaatst naar 'DNC Archief' tabblad
+      - ⏳ RECENT CONTACT rijen → verplaatst naar 'Recent Contact Archief' tabblad
+      - ⚠ GEEN EMAIL rijen    → verwijderd (na enrich geen email gevonden)
+      - Geen email na enrich (legacy, zonder status) → verwijderd
+      - 🔴 DRY RUN (mail)     → blijft staan, wordt opnieuw aangeboden bij verzending
     """
     all_rows = get_all_rows(sheet)
     spreadsheet = sheet.spreadsheet
 
-    moved_dnc = deleted_no_email = deleted_dry_run = 0
-    dnc_rows = []
-    delete_rows = []
+    moved_dnc = moved_recent = deleted_no_email = 0
+    dnc_rows          = []
+    recent_rows       = []
+    no_email_rows     = []
+    delete_rows       = []
 
     for row in all_rows:
         mail_status = row[Col.MAIL_STATUS]
@@ -351,7 +392,12 @@ def cleanup_sheet(sheet: gspread.Worksheet) -> dict:
 
         if mail_status == MailStatus.DNC:
             dnc_rows.append(row)
+        elif mail_status == MailStatus.RECENT_CONTACT:
+            recent_rows.append(row)
+        elif mail_status == MailStatus.NO_EMAIL:
+            no_email_rows.append(row)
         elif enriched == Enriched.YES and not email:
+            # Legacy fallback: verrijkt maar geen status en geen email
             delete_rows.append(row)
 
     if dnc_rows:
@@ -360,10 +406,19 @@ def cleanup_sheet(sheet: gspread.Worksheet) -> dict:
         archive.append_rows(archive_data, value_input_option="USER_ENTERED")
         moved_dnc = len(dnc_rows)
 
-    for row in delete_rows:
-        deleted_no_email += 1
+    if recent_rows:
+        rc_archive = _get_or_create_recent_archive(spreadsheet)
+        rc_data = [[row.get(col, "") for col in range(1, Col.TOTAL_COLS + 1)] for row in recent_rows]
+        rc_archive.append_rows(rc_data, value_input_option="USER_ENTERED")
+        moved_recent = len(recent_rows)
 
-    all_to_delete = sorted(dnc_rows + delete_rows, key=lambda r: r["row_number"], reverse=True)
+    deleted_no_email = len(no_email_rows) + len(delete_rows)
+
+    all_to_delete = sorted(
+        dnc_rows + recent_rows + no_email_rows + delete_rows,
+        key=lambda r: r["row_number"],
+        reverse=True,
+    )
 
     if all_to_delete:
         requests = []
@@ -383,6 +438,7 @@ def cleanup_sheet(sheet: gspread.Worksheet) -> dict:
 
     return {
         "moved_dnc":        moved_dnc,
+        "moved_recent":     moved_recent,
         "deleted_no_email": deleted_no_email,
     }
 

@@ -1,6 +1,6 @@
 # YAG Acquisitie Tool
 
-Python CLI voor geautomatiseerde B2B acquisitie. Haalt leads op via Lusha, filtert op DNC, enrichet met contactgegevens, genereert gepersonaliseerde HTML-mails via OpenAI en verstuurt via Gmail SMTP.
+Python CLI voor geautomatiseerde B2B acquisitie. Haalt leads op via Lusha, filtert op DNC en recente contactmomenten, enrichet met contactgegevens, genereert gepersonaliseerde HTML-mails via OpenAI en verstuurt via Gmail SMTP.
 
 **Google Sheets is de centrale database** — alle leads, statussen en send-logs worden daar bijgehouden. Geen lokale CSV-bestanden.
 
@@ -24,6 +24,7 @@ yag-mailer/
 │   ├── lusha.py                   ← Lusha search + enrich + industries ophalen
 │   ├── ai_gen.py                  ← OpenAI e-mail generatie
 │   ├── storage.py                 ← DNC lijst (lokaal Excel-bestand)
+│   ├── recent_contacts.py         ← Cooldown check op basis van Laatste Contactmomenten
 │   └── gmail_send.py              ← Gmail SMTP verzending via App Password
 │
 ├── credentials/
@@ -31,6 +32,7 @@ yag-mailer/
 │
 ├── data/
 │   ├── Niet Benaderen.xlsx        ← DNC lijst — kolom "Bedrijf" vereist
+│   ├── Laatste_Contactmomenten.xlsx ← Recente contactmomenten — cooldown check
 │   └── YAG Voorstelslides.pdf     ← Optionele PDF bijlage (ATTACHMENT_PDF in .env)
 │
 └── output/
@@ -71,6 +73,8 @@ Naast het hoofdtabblad worden twee extra tabbladen automatisch aangemaakt:
 ```powershell
 pip install -r requirements.txt
 ```
+
+`openpyxl` is vereist voor het lezen van de DNC lijst en de Laatste Contactmomenten. Dit pakket zit in `requirements.txt`.
 
 ### 2. Google Sheets — Service Account
 
@@ -161,11 +165,13 @@ Het script vraagt bij elke start wie je bent en laadt automatisch het juiste pro
 - **Meta-velden** (Consultant, Vestiging, Type, Hoe contact) worden vooringevuld vanuit je `.env` — druk Enter om te bevestigen, of wijzig ze
 - **Duplicaat check** — contacten die al in de sheet staan worden overgeslagen
 - **DNC scan direct na het ophalen** — leads van geblokkeerde bedrijven worden meteen gemarkeerd als 🚫 DNC
+- **Recente contacten scan direct na de DNC scan** — leads van bedrijven die nog in cooldown zitten worden gemarkeerd als ⏳ RECENT CONTACT (zie [Cooldown regels](#cooldown-regels))
 
 ### [2] Leads enrichen
 
 - Haalt email, telefoon en LinkedIn URL op voor alle leads met `Enriched = No`
-- Slaat 🚫 DNC en ⏭ AL GEMAILD rijen automatisch over
+- Slaat 🚫 DNC, ⏭ AL GEMAILD en ⏳ RECENT CONTACT rijen automatisch over — die hoef je niet te enrichen
+- Als Lusha **geen emailadres** vindt voor een lead, krijgt die rij automatisch de status **⚠ GEEN EMAIL** — deze rijen worden daarna overgeslagen bij AI-generatie en verzending
 - Groepeert op Request ID (vereiste van Lusha API)
 - Resultaten worden direct teruggeschreven naar de sheet
 
@@ -180,7 +186,7 @@ Het script vraagt bij elke start wie je bent en laadt automatisch het juiste pro
 - URLs die het model toch toevoegt worden automatisch verwijderd uit de connectiezinnen
 - **Dry-run optie** — genereert een preview zonder echte OpenAI API calls; status wordt 🔴 DRY RUN (kan later opnieuw worden aangeboden voor echte generatie)
 - Verplichte velden voor AI: Consultant, Vestiging, Type, Hoe contact — ontbreken ze, dan wordt de rij overgeslagen
-- Meta-velden worden meegeschreven bij elke AI-generatie, zodat eventueel lege kolommen automatisch worden aangevuld vanuit je profiel
+- Rijen met ⚠ GEEN EMAIL of ⏳ RECENT CONTACT worden overgeslagen
 
 ### [4] Mails versturen
 
@@ -191,6 +197,8 @@ Het script vraagt bij elke start wie je bent en laadt automatisch het juiste pro
   - 🚫 DNC — tweede controle (voor het geval de lijst is bijgewerkt na de search)
   - ⏭ AL GEMAILD — suppressie check op e-mailadres (uit sheet, alleen ✅ SENT telt)
   - Bedrijf al benaderd — check op bedrijfsnaam van eerder verstuurde mails
+  - ⚠ GEEN EMAIL — rijen zonder emailadres worden permanent overgeslagen
+  - ⏳ RECENT CONTACT — rijen in cooldown worden overgeslagen
 - Verstuurt als **HTML-mail** met:
   - YAG logo ingesloten (geen externe afbeeldingslink nodig)
   - Klikbare LinkedIn en website links in de signature
@@ -206,9 +214,25 @@ Toont tellingen per status (Enriched, AI Status, Mail Status), tokenverbruik met
 ### [6] Sheet opschonen
 
 - **DNC rijen** worden verplaatst naar het 'DNC Archief' tabblad
-- **Rijen zonder email** (na enrichment) worden verwijderd
+- **⚠ GEEN EMAIL rijen** worden verwijderd — Lusha heeft voor deze leads nooit een emailadres gevonden
 - **🔴 DRY RUN rijen** blijven staan — die worden automatisch opnieuw aangeboden bij stap 4
+- **⏳ RECENT CONTACT rijen** blijven staan — de cooldown is tijdelijk en loopt vanzelf af
 - Verwijdering gebeurt in één batch-API-call om quota-fouten te voorkomen
+
+---
+
+## Cooldown regels
+
+Het bestand `data/Laatste_Contactmomenten.xlsx` bevat de contacthistorie van alle YAG consultants. Na het ophalen van leads wordt elk bedrijf automatisch gecheckt.
+
+| Type contactmoment | Cooldown |
+|-------------------|----------|
+| Uitsluitend "Gemaild" en/of "Gebeld" | **3 maanden** |
+| Bevat iets anders (Gesprek, Afspraak, Proposal, etc.) | **1 jaar** |
+
+Het type-veld in de Excel kan meerdere waarden bevatten gescheiden door `;`, bijvoorbeeld `"Gemaild; Gebeld; Gesprek"`. Zodra er iets anders dan mailen of bellen in staat, geldt de langere cooldown van 1 jaar.
+
+Een bedrijf dat momenteel in cooldown zit krijgt de status **⏳ RECENT CONTACT** in kolom J, met in kolom N (Opmerking) de reden en het aantal resterende dagen. Deze rijen worden niet geënrichet, niet ge-AI'd en niet verstuurd. Ze blijven in de sheet staan zodat je ze na de cooldown alsnog kunt oppakken.
 
 ---
 
@@ -252,6 +276,7 @@ De volgende variabelen zijn gedeeld en staan bij iedereen hetzelfde: `SPREADSHEE
 | `MAX_EMAILS` | `20` | Max mails per sessie |
 | `RATE_LIMIT_SEC` | `2` | Seconden wachten tussen mails |
 | `DNC_PATH` | `data/Niet Benaderen.xlsx` | Pad naar DNC lijst |
+| `RECENT_CONTACTS_PATH` | `data/Laatste_Contactmomenten.xlsx` | Pad naar contactmomenten Excel |
 | `ATTACHMENT_PDF` | *(leeg = geen bijlage)* | Pad naar PDF bijlage |
 | `VESTIGING_DEFAULT` | `Eindhoven-Tilburg` | Vooringevulde vestiging |
 | `TYPE_DEFAULT` | `Cold` | Vooringevuld contacttype |
@@ -267,13 +292,14 @@ De volgende variabelen zijn gedeeld en staan bij iedereen hetzelfde: `SPREADSHEE
 |------|--------|------|-------|
 | DNC bedrijf | Direct na search | `data/Niet Benaderen.xlsx` | Gemarkeerd als 🚫 DNC |
 | DNC bedrijf | Voor verzending | `data/Niet Benaderen.xlsx` | Gemarkeerd als 🚫 DNC |
+| Recente contacten | Direct na search | `data/Laatste_Contactmomenten.xlsx` | Gemarkeerd als ⏳ RECENT CONTACT |
+| Geen email gevonden | Na enrichment | Lusha API response | Gemarkeerd als ⚠ GEEN EMAIL |
 | Al gemaild (email) | Voor verzending | Sheet — alleen ✅ SENT | Overgeslagen |
 | Bedrijf al benaderd | Voor verzending | Sheet — alleen ✅ SENT | Overgeslagen |
 
-De DNC check gebruikt **fuzzy matching**:
+De DNC check en de recent contacts check gebruiken beiden **fuzzy matching**:
 - Rechtsvorm-suffixen worden genegeerd (B.V., N.V., Ltd, GmbH, enz.)
-- Samengestelde namen worden gesplitst op `;`, `|`, ` - `, `,`
-- Substrings van ≥8 tekens worden herkend in beide richtingen
+- Substrings van ≥4 tekens worden herkend in beide richtingen
 
 ---
 
@@ -298,6 +324,8 @@ De DNC check gebruikt **fuzzy matching**:
 | `🔴 DRY RUN` | Test-verzending — wordt opnieuw aangeboden bij stap 4 |
 | `🚫 DNC` | Geblokkeerd door DNC lijst |
 | `⏭ AL GEMAILD` | E-mailadres al eerder benaderd |
+| `⚠ GEEN EMAIL` | Na enrichment geen emailadres gevonden — wordt verwijderd bij stap 6 |
+| `⏳ RECENT CONTACT` | Bedrijf in cooldown — reden + resterende dagen in kolom N |
 | `❌ ERROR` | SMTP fout — zie kolom N (Opmerking) |
 
 ---
@@ -328,3 +356,9 @@ Controleer of `ATTACHMENT_PDF` in je `.env` naar een bestaand bestand wijst. Het
 
 **AI bericht klopt maar meta-kolommen (Consultant, Vestiging etc.) zijn leeg**
 Dit kon voorkomen in een oudere versie. Nu worden meta-velden altijd meegeschreven bij AI-generatie. Draai stap [3] opnieuw op de betreffende rijen — ze worden automatisch aangevuld vanuit je profiel.
+
+**Bedrijf staat op ⏳ RECENT CONTACT maar je wilt het toch mailen**
+Verwijder de status handmatig in de sheet (maak kolom J leeg voor die rij) en zet kolom N ook leeg. Het bedrijf wordt dan bij de volgende stap weer normaal opgepakt. Doe dit alleen als je zeker weet dat je het wilt — de cooldown bestaat om dubbel contact te voorkomen.
+
+**Laatste_Contactmomenten.xlsx niet gevonden**
+Zet `RECENT_CONTACTS_PATH=data/Laatste_Contactmomenten.xlsx` in je `.env` en zorg dat het bestand op dat pad staat. Als het bestand ontbreekt geeft het script een waarschuwing maar loopt de rest van stap 1 gewoon door.
